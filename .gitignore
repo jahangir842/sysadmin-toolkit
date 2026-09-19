@@ -1,0 +1,9 @@
+*.log
+*.tmp
+*.swp
+.DS_Store
+coverage/
+reports/
+audit-*.json
+config/*.conf
+!config/example.conf

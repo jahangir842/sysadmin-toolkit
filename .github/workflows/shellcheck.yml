@@ -1,0 +1,20 @@
+name: shell-validation
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install validation tools
+        run: sudo apt-get update && sudo apt-get install -y shellcheck bats jq
+      - name: ShellCheck
+        run: shellcheck bin/* lib/*.sh tests/*.bash tests/*.bats tests/fixtures/bin/*
+      - name: Bats
+        run: bats tests

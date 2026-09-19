@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+printf '6.1.0-fixture\n'

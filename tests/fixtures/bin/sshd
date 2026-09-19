@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+if [[ ${MOCK_SSH_INSECURE:-0} == 1 ]]; then
+  printf 'permitrootlogin yes\npasswordauthentication yes\n'
+else
+  printf 'permitrootlogin no\npasswordauthentication no\n'
+fi
+printf 'port 22\nlistenaddress 0.0.0.0:22\n'
+printf 'pubkeyauthentication yes\nkbdinteractiveauthentication no\nmaxauthtries 6\n'

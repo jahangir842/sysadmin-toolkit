@@ -1,0 +1,261 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+SCRIPT_PATH=$(readlink -f -- "$0" 2>/dev/null || printf '%s' "$0")
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)
+LIB_DIR=${SYSADMIN_TOOLKIT_LIB_DIR:-"$SCRIPT_DIR/../lib"}
+# shellcheck disable=SC1091
+source "$LIB_DIR/common.sh" || exit 2
+# shellcheck disable=SC1091
+source "$LIB_DIR/logging.sh" || exit 2
+# shellcheck disable=SC1091
+source "$LIB_DIR/platform.sh" || exit 2
+
+FORMAT=text
+CONFIG_FILE=
+INCLUDE_SENSITIVE=no
+SSH_USER=
+PRIVILEGED_GROUPS=(sudo docker)
+AUTH_FAILURE_SINCE="24 hours ago"
+FAIL_ON_SSH_ROOT_LOGIN=yes
+FAIL_ON_SSH_PASSWORD_AUTH=no
+
+usage() {
+  cat <<'EOF'
+Usage: host-security-audit [OPTIONS]
+
+Read-only Debian/Ubuntu host security observations.
+
+  --format text|json       Output format (default: text)
+  --config FILE            Load root-owned site expectations
+  --include-sensitive      Include usernames and IP addresses
+  --ssh-user USER          Evaluate effective SSH configuration for USER
+  --help                   Show this help
+  --version                Show version
+
+Exit codes: 0 no FAIL findings, 1 FAIL findings present, 2 usage/execution error.
+EOF
+}
+
+parse_args() {
+  while (($#)); do
+    case $1 in
+      --help) usage; exit 0 ;;
+      --version) printf 'host-security-audit %s\n' "$TOOLKIT_VERSION"; exit 0 ;;
+      --format)
+        (($# >= 2)) || die "--format requires a value"
+        FORMAT=$2; shift 2 ;;
+      --config)
+        (($# >= 2)) || die "--config requires a file"
+        CONFIG_FILE=$2; shift 2 ;;
+      --include-sensitive) INCLUDE_SENSITIVE=yes; shift ;;
+      --ssh-user)
+        (($# >= 2)) || die "--ssh-user requires a user"
+        SSH_USER=$2; shift 2 ;;
+      --apply) die "this audit is read-only; --apply is not supported" ;;
+      --) shift; (($# == 0)) || die "unexpected positional arguments" ;;
+      -*) die "unknown option: $1" ;;
+      *) die "unexpected argument: $1" ;;
+    esac
+  done
+  [[ $FORMAT == text || $FORMAT == json ]] || die "format must be text or json"
+  [[ -z $SSH_USER ]] || is_safe_name "$SSH_USER" || die "invalid SSH user name"
+}
+
+redact() { if [[ $INCLUDE_SENSITIVE == yes ]]; then printf '%s' "$1"; else printf '[redacted]'; fi; }
+
+apply_config_value() {
+  local key=$1 value=$2
+  case $key in
+    PRIVILEGED_GROUPS)
+      read -r -a PRIVILEGED_GROUPS <<<"$value"
+      ((${#PRIVILEGED_GROUPS[@]} > 0))
+      ;;
+    AUTH_FAILURE_SINCE) [[ -n $value ]] && AUTH_FAILURE_SINCE=$value ;;
+    FAIL_ON_SSH_ROOT_LOGIN)
+      [[ $value == yes || $value == no ]] && FAIL_ON_SSH_ROOT_LOGIN=$value ;;
+    FAIL_ON_SSH_PASSWORD_AUTH)
+      [[ $value == yes || $value == no ]] && FAIL_ON_SSH_PASSWORD_AUTH=$value ;;
+    *) return 1 ;;
+  esac
+}
+
+audit_identity() {
+  local host now kernel up os
+  host=$(hostname 2>/dev/null) || host=unknown
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || now=unknown
+  kernel=$(uname -r 2>/dev/null) || kernel=unknown
+  up=$(uptime -p 2>/dev/null) || up=unknown
+  os=$(os_pretty_name 2>/dev/null) || os=unknown
+  [[ $INCLUDE_SENSITIVE == yes ]] || host='[redacted]'
+  add_finding INFO host "hostname=$host timestamp=$now os=$os kernel=$kernel uptime=$up"
+}
+
+interactive_accounts() {
+  local passwd_file shells_file count users shell
+  passwd_file=$(root_path /etc/passwd); shells_file=$(root_path /etc/shells)
+  [[ -r $passwd_file ]] || { add_finding UNKNOWN accounts "cannot read account database"; return; }
+  users=; count=0
+  while IFS=: read -r name _ _ _ _ _ shell; do
+    [[ -n $shell && $shell != */nologin && $shell != */false ]] || continue
+    if [[ -r $shells_file ]] && ! grep -Fxq "$shell" "$shells_file"; then continue; fi
+    ((count += 1)); users+="${users:+,}$name:$shell"
+  done <"$passwd_file"
+  if [[ $INCLUDE_SENSITIVE == yes ]]; then
+    add_finding INFO accounts "interactive accounts ($count): ${users:-none}"
+  else
+    add_finding INFO accounts "interactive account count=$count; usernames and shells redacted"
+  fi
+}
+
+classify_password_status() {
+  case $1 in
+    P) printf password-set ;; L|LK) printf password-locked ;; NP) printf no-password ;; *) printf unknown ;;
+  esac
+}
+
+password_states() {
+  local passwd_file name _ status label total=0 set_count=0 locked=0 empty=0 unknown=0 details=
+  passwd_file=$(root_path /etc/passwd)
+  if ((EUID != 0)) && [[ ${SYSADMIN_TOOLKIT_TESTING:-0} != 1 ]]; then
+    add_finding UNKNOWN password-state "root privileges required to inspect password states"
+    return
+  fi
+  command_exists passwd || { add_finding UNKNOWN password-state "passwd command is unavailable"; return; }
+  while IFS=: read -r name _ _ _ _ _ shell; do
+    [[ $shell != */nologin && $shell != */false ]] || continue
+    status=$(passwd -S "$name" 2>/dev/null | awk '{print $2}') || status=unknown
+    label=$(classify_password_status "$status"); ((total += 1))
+    case $label in password-set) ((set_count += 1));; password-locked) ((locked += 1));; no-password) ((empty += 1));; *) ((unknown += 1));; esac
+    [[ $INCLUDE_SENSITIVE == yes ]] && details+="${details:+,}$name=$label"
+  done <"$passwd_file"
+  if [[ $INCLUDE_SENSITIVE == yes ]]; then
+    add_finding INFO password-state "${details:-no interactive accounts}"
+  else
+    add_finding INFO password-state "accounts=$total password-set=$set_count password-locked=$locked no-password=$empty unknown=$unknown"
+  fi
+  ((empty == 0)) || add_finding FAIL password-state "one or more interactive accounts have no password; access implications depend on other authentication controls"
+}
+
+privileged_groups() {
+  local group entry members count
+  for group in "${PRIVILEGED_GROUPS[@]}"; do
+    is_safe_name "$group" || die "invalid privileged group in configuration: $group"
+    if ! entry=$(getent group "$group" 2>/dev/null); then
+      add_finding INFO privileged-groups "group $group is not present"
+      continue
+    fi
+    members=${entry##*:}; count=0
+    [[ -z $members ]] || count=$(awk -F, '{print NF}' <<<"$members")
+    if [[ $INCLUDE_SENSITIVE == yes ]]; then
+      add_finding WARN privileged-groups "group=$group members=${members:-none}; membership may grant elevated access"
+    else
+      add_finding WARN privileged-groups "group=$group member-count=$count; usernames redacted"
+    fi
+  done
+}
+
+last_logins() {
+  local output lines
+  command_exists lastlog || { add_finding UNKNOWN last-login "lastlog command is unavailable"; return; }
+  output=$(lastlog 2>/dev/null) || { add_finding UNKNOWN last-login "last-login data unavailable"; return; }
+  lines=$(awk 'NR > 1 && $0 !~ /Never logged in/ {count++} END {print count+0}' <<<"$output")
+  if [[ $INCLUDE_SENSITIVE == yes ]]; then
+    add_finding INFO last-login "accounts with recorded login=$lines; run lastlog directly for authorized detailed review"
+  else
+    add_finding INFO last-login "accounts with recorded login=$lines; usernames and source addresses redacted"
+  fi
+}
+
+sshd_config() {
+  local output user_output root_login password_auth ports addresses level safe_summary
+  command_exists sshd || { add_finding UNKNOWN ssh "sshd command is unavailable; effective configuration not evaluated"; return; }
+  output=$(sshd -T 2>/dev/null) || { add_finding UNKNOWN ssh "sshd rejected global effective-configuration query"; return; }
+  root_login=$(awk '$1 == "permitrootlogin" {print $2; exit}' <<<"$output")
+  password_auth=$(awk '$1 == "passwordauthentication" {print $2; exit}' <<<"$output")
+  ports=$(awk '$1 == "port" {print $2}' <<<"$output" | paste -sd, -)
+  addresses=$(awk '$1 == "listenaddress" {print $2}' <<<"$output" | paste -sd, -)
+  level=PASS; [[ $root_login == no ]] || level=$([[ $FAIL_ON_SSH_ROOT_LOGIN == yes ]] && printf FAIL || printf WARN)
+  add_finding "$level" ssh-root-login "effective permitrootlogin=${root_login:-unknown}; non-no values require contextual review"
+  level=PASS; [[ $password_auth == no ]] || level=$([[ $FAIL_ON_SSH_PASSWORD_AUTH == yes ]] && printf FAIL || printf WARN)
+  add_finding "$level" ssh-password-auth "effective passwordauthentication=${password_auth:-unknown}; account password state alone does not determine this"
+  if [[ $ports == 22 ]]; then
+    add_finding INFO ssh-listen "port 22 is the default, not automatically insecure"
+  else
+    add_finding INFO ssh-listen "configured ports=${ports:-unknown}"
+  fi
+  if [[ $INCLUDE_SENSITIVE == yes ]]; then
+    add_finding INFO ssh-listen "configured listen addresses=${addresses:-default}"
+  else
+    add_finding INFO ssh-listen "listen addresses redacted"
+  fi
+  safe_summary=$(awk '$1 ~ /^(pubkeyauthentication|kbdinteractiveauthentication|x11forwarding|allowtcpforwarding|maxauthtries)$/ {printf "%s%s=%s", separator, $1, $2; separator=","}' <<<"$output")
+  add_finding INFO ssh-effective "global effective settings: ${safe_summary:-no additional selected settings reported}"
+  if [[ -n $SSH_USER ]]; then
+    user_output=$(sshd -T -C "user=$SSH_USER,host=localhost,addr=127.0.0.1" 2>/dev/null) || {
+      add_finding UNKNOWN ssh-user-config "sshd rejected per-user effective-configuration query"
+      return
+    }
+    safe_summary=$(awk '$1 ~ /^(permitrootlogin|passwordauthentication|pubkeyauthentication|kbdinteractiveauthentication|x11forwarding|allowtcpforwarding|maxauthtries)$/ {printf "%s%s=%s", separator, $1, $2; separator=","}' <<<"$user_output")
+    add_finding INFO ssh-user-config "per-user effective settings evaluated for explicitly requested user: ${safe_summary:-selected settings unavailable}"
+  fi
+}
+
+network_checks() {
+  local output tcp udp
+  command_exists ss || { add_finding UNKNOWN listeners "ss command is unavailable"; return; }
+  output=$(ss -H -lntu 2>/dev/null) || { add_finding UNKNOWN listeners "unable to query listening sockets"; return; }
+  tcp=$(awk '$1 == "tcp" && ($5 ~ /^\*:/ || $5 ~ /^0\.0\.0\.0:/ || $5 ~ /^\[::\]:/) {n++} END {print n+0}' <<<"$output")
+  udp=$(awk '$1 == "udp" && ($5 ~ /^\*:/ || $5 ~ /^0\.0\.0\.0:/ || $5 ~ /^\[::\]:/) {n++} END {print n+0}' <<<"$output")
+  add_finding WARN listeners "public/wildcard listeners: tcp=$tcp udp=$udp; exposure also depends on host and provider firewalls"
+  if command_exists ufw; then
+    output=$(ufw status 2>/dev/null) || { add_finding UNKNOWN firewall "UFW installed but status unavailable (root may be required)"; return; }
+    add_finding INFO firewall "$(awk 'NR == 1 {print; exit}' <<<"$output"); evaluate with listening addresses and provider-level firewalls"
+  else
+    add_finding INFO firewall "UFW is not installed; another host or provider firewall may apply"
+  fi
+}
+
+service_checks() {
+  local output count
+  if command_exists fail2ban-client; then
+    if output=$(fail2ban-client status sshd 2>/dev/null); then
+      count=$(awk -F: '/Currently banned/ {gsub(/[[:space:]]/, "", $2); print $2}' <<<"$output")
+      add_finding INFO fail2ban "sshd jail available; currently-banned=${count:-unknown}; addresses redacted"
+    else add_finding UNKNOWN fail2ban "fail2ban sshd jail status unavailable"; fi
+  else add_finding INFO fail2ban "fail2ban-client is not installed"; fi
+
+  if command_exists journalctl; then
+    output=$(journalctl --since "$AUTH_FAILURE_SINCE" -u ssh -u sshd --no-pager 2>/dev/null) || output=
+    count=$(grep -Eic 'failed password|authentication failure|invalid user' <<<"$output" || true)
+    add_finding INFO ssh-auth-failures "aggregate failures since configured period=$count; identities and addresses not emitted"
+    output=$(journalctl -p 0..3 --since "$AUTH_FAILURE_SINCE" --no-pager 2>/dev/null) || output=
+    count=$(awk 'NF {n++} END {print n+0}' <<<"$output")
+    add_finding "$([[ $count -eq 0 ]] && printf PASS || printf WARN)" system-errors "high-severity journal entries in configured period=$count; raw logs not emitted"
+  else
+    add_finding UNKNOWN ssh-auth-failures "journalctl is unavailable"
+    add_finding UNKNOWN system-errors "journalctl is unavailable"
+  fi
+  if command_exists systemctl; then
+    output=$(systemctl --failed --no-legend --plain 2>/dev/null) || { add_finding UNKNOWN systemd "failed-unit query unavailable"; return; }
+    count=$(awk 'NF {n++} END {print n+0}' <<<"$output")
+    add_finding "$([[ $count -eq 0 ]] && printf PASS || printf FAIL)" systemd "failed unit count=$count; unit names omitted"
+  else add_finding UNKNOWN systemd "systemctl is unavailable"; fi
+}
+
+main() {
+  parse_args "$@"
+  [[ -z $CONFIG_FILE ]] || load_config "$CONFIG_FILE"
+  detect_platform
+  case $? in 1) die "unsupported platform: ${PLATFORM_ID:-unknown} (Debian/Ubuntu required)";; 2) die "cannot read /etc/os-release";; esac
+  require_command awk; require_command grep; require_command mktemp; require_command getent
+  make_temp_dir
+  audit_identity; interactive_accounts; password_states; privileged_groups; last_logins
+  sshd_config; network_checks; service_checks
+  if [[ $FORMAT == json ]]; then render_json; else render_text; fi
+  findings_exit_code
+}
+
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  main "$@"
+fi

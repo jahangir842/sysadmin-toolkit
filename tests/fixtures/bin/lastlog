@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+printf 'Username Port From Latest\n'
+printf 'alice pts/0 198.51.100.10 Thu Jan 2 03:04:05 +0000 2026\n'
+printf 'locked **Never logged in**\n'

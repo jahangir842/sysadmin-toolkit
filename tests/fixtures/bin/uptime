@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+printf 'up 1 day, 2 hours\n'

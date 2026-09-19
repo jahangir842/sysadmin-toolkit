@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+[[ $1 == group ]] || exit 2
+case $2 in
+  sudo) printf 'sudo:x:27:alice\n' ;;
+  docker) exit 2 ;;
+  *) exit 2 ;;
+esac

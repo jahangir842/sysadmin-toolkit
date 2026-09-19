@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+if [[ ${MOCK_SYSTEMD_FAILED:-0} == 1 ]]; then
+  printf 'broken.service loaded failed failed Fixture\n'
+fi

@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -uo pipefail
+case ${1:-} in
+  --help) printf 'Usage: backup-verification [--help|--version]\nReserved for a future read-only implementation.\n'; exit 0 ;;
+  --version) printf 'backup-verification 0.1.0\n'; exit 0 ;;
+esac
+printf 'ERROR: backup-verification is not implemented in version 0.1.0\n' >&2
+exit 2
