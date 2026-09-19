@@ -92,7 +92,10 @@ setup() { setup_audit_fixture; }
 
   [ "$audit_status" -eq 0 ]
   jq -e '.tool == "host-security-audit" and (.findings | type == "array")' "$json_file"
-  ! grep -q $'\033' "$json_file"
+  if grep -q $'\033' "$json_file"; then
+    printf 'JSON output contains an ANSI escape sequence\n' >&2
+    return 1
+  fi
 }
 
 @test "failed systemd units produce exit one" {
