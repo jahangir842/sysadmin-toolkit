@@ -18,10 +18,12 @@ tar -tzf sysadmin-toolkit-v0.1.0.tar.gz
 tar -xzf sysadmin-toolkit-v0.1.0.tar.gz
 ```
 
-Inspect the archive member list before extraction and install using the commands
-in `installation.md`. Obtain the expected checksum through an authenticated,
-independent release channel; a checksum downloaded from the same compromised
-location alone does not establish authenticity.
+Inspect the archive member list before extraction. System-wide installation is
+optional; see the README for installation commands. You can also run
+`sudo ./bin/host-security-audit` from the verified checkout. Obtain the expected
+checksum through an authenticated, independent release channel; a checksum
+downloaded from the same compromised location alone does not establish
+authenticity.
 
 A client repository can record only non-secret provenance, for example:
 
