@@ -1,26 +1,53 @@
 #!/usr/bin/env bash
 
 declare -a FINDING_LEVELS=() FINDING_CHECKS=() FINDING_MESSAGES=()
+declare -a FINDING_DETAILS=() FINDING_REMEDIATIONS=()
 
 add_finding() {
+  local details=${4-}
+  [[ -n $details ]] || details='{}'
   FINDING_LEVELS+=("$1")
   FINDING_CHECKS+=("$2")
   FINDING_MESSAGES+=("$3")
+  FINDING_DETAILS+=("$details")
+  FINDING_REMEDIATIONS+=("${5:-}")
 }
 
 json_escape() {
-  local value=$1
-  value=${value//\\/\\\\}; value=${value//\"/\\\"}
-  value=${value//$'\n'/\\n}; value=${value//$'\r'/\\r}; value=${value//$'\t'/\\t}
-  printf '%s' "$value"
+  local value=$1 character code output='' i
+  LC_ALL=C
+  for ((i = 0; i < ${#value}; i++)); do
+    character=${value:i:1}
+    case $character in
+      '"') output+='\"' ;;
+      $'\\') output+=$'\\' ;;
+      $'\b') output+='\b' ;;
+      $'\f') output+='\f' ;;
+      $'\n') output+='\n' ;;
+      $'\r') output+='\r' ;;
+      $'\t') output+='\t' ;;
+      *)
+        printf -v code '%d' "'$character"
+        if ((code < 32)); then
+          printf -v character '\\u%04x' "$code"
+        fi
+        output+=$character
+        ;;
+    esac
+  done
+  printf '%s' "$output"
 }
 
 report_section() {
   case $1 in
-    accounts|password-state|privileged-groups|last-login) printf 'AUDITING USER ACCOUNTS (UID >= 1000)...' ;;
-    ssh|ssh-root-login|ssh-password-auth|ssh-port|ssh-listen-addresses|ssh-effective|ssh-user-config) printf 'SSH SECURITY CONFIGURATION' ;;
+    accounts|password-state|privileged-groups|last-login|account-identifiers|account-aging|sudo|authorized-keys) printf 'USER ACCOUNTS & PRIVILEGE' ;;
+    ssh|ssh-root-login|ssh-password-auth|ssh-empty-passwords|ssh-port|ssh-listen-addresses|ssh-effective|ssh-user-config) printf 'SSH SECURITY CONFIGURATION' ;;
     listeners|firewall) printf 'NETWORK & FIREWALL STATUS' ;;
-    fail2ban|ssh-auth-failures|system-errors|systemd) printf 'SERVICES & SECURITY EVENTS' ;;
+    updates|automatic-updates|reboot-required|lifecycle) printf 'UPDATES & PLATFORM SUPPORT' ;;
+    apparmor|kernel-hardening|secure-boot) printf 'MANDATORY ACCESS & KERNEL' ;;
+    sensitive-files|world-writable|privileged-files|mounts|encryption) printf 'FILESYSTEM & STORAGE' ;;
+    persistence|fail2ban|ssh-auth-failures|system-errors|systemd|time-sync|journald|auditd|logrotate|log-space) printf 'SERVICES, LOGGING & SECURITY EVENTS' ;;
+    baseline-diff) printf 'BASELINE COMPARISON' ;;
     *) printf 'OTHER CHECKS' ;;
   esac
 }
@@ -32,19 +59,43 @@ report_label() {
     password-state) printf 'Account password status' ;;
     privileged-groups) printf 'Privileged group access' ;;
     last-login) printf 'Account login activity' ;;
+    account-identifiers) printf 'Account identifier integrity' ;;
+    account-aging) printf 'Account expiration and dormancy' ;;
+    sudo) printf 'Sudo policy' ;;
+    authorized-keys) printf 'Authorized SSH keys' ;;
     ssh) printf 'SSH configuration' ;;
     ssh-root-login) printf 'SSH root login' ;;
     ssh-password-auth) printf 'SSH password authentication' ;;
+    ssh-empty-passwords) printf 'SSH empty passwords' ;;
     ssh-port) printf 'SSH port' ;;
     ssh-listen-addresses) printf 'SSH listen addresses' ;;
     ssh-effective) printf 'Effective SSH settings' ;;
     ssh-user-config) printf 'Per-user SSH settings' ;;
     listeners) printf 'Network listeners' ;;
     firewall) printf 'Firewall status' ;;
+    updates) printf 'Security updates' ;;
+    automatic-updates) printf 'Automatic updates' ;;
+    reboot-required) printf 'Reboot requirement' ;;
+    lifecycle) printf 'Distribution support' ;;
+    apparmor) printf 'AppArmor confinement' ;;
+    kernel-hardening) printf 'Kernel hardening' ;;
+    secure-boot) printf 'Secure Boot' ;;
+    sensitive-files) printf 'Sensitive file permissions' ;;
+    world-writable) printf 'World-writable paths' ;;
+    privileged-files) printf 'Privileged executables' ;;
+    mounts) printf 'Mount protections' ;;
+    encryption) printf 'Storage encryption' ;;
+    persistence) printf 'Persistence mechanisms' ;;
     fail2ban) printf 'Fail2ban protection' ;;
     ssh-auth-failures) printf 'SSH authentication activity' ;;
     system-errors) printf 'High-severity system log entries' ;;
     systemd) printf 'System services' ;;
+    time-sync) printf 'Time synchronization' ;;
+    journald) printf 'Journal persistence' ;;
+    auditd) printf 'Audit service' ;;
+    logrotate) printf 'Log rotation' ;;
+    log-space) printf 'Log filesystem capacity' ;;
+    baseline-diff) printf 'Baseline difference' ;;
     *) printf '%s' "$1" ;;
   esac
 }
@@ -62,7 +113,7 @@ level_color() {
 
 render_account_table() {
   local message=$1 reset=$2 green=$3 red=$4 yellow=$5
-  local summary rows= username status groups last_login status_color group_color
+  local summary rows='' username status groups last_login status_color group_color
   summary=${message%%$'\n'*}
   printf '%s\n' "$summary"
   printf '%-15s %-10s %-40s %s\n' 'USERNAME' 'STATUS' 'GROUPS' 'LAST LOGIN'
@@ -81,8 +132,8 @@ render_account_table() {
 }
 
 render_text() {
-  local i level color reset blue yellow green red bold section previous_section= check message
-  local host_message= hostname=unknown timestamp=unknown os=unknown kernel=unknown uptime=unknown
+  local i level color reset blue yellow green red bold section previous_section='' check message remediation
+  local host_message='' hostname=unknown timestamp=unknown os=unknown kernel=unknown uptime=unknown
   local pass_count=0 warn_count=0 fail_count=0 info_count=0 unknown_count=0
   local total=${#FINDING_LEVELS[@]}
   REPORT_COLORS=no
@@ -138,6 +189,7 @@ render_text() {
     level=${FINDING_LEVELS[$i]}
     check=${FINDING_CHECKS[$i]}
     message=${FINDING_MESSAGES[$i]}
+    remediation=${FINDING_REMEDIATIONS[$i]}
     [[ $check == host ]] && continue
     section=$(report_section "$check")
     if [[ $section != "$previous_section" ]]; then
@@ -153,6 +205,7 @@ render_text() {
 
     color=$(level_color "$level")
     printf '%-34s %s%-7s%s %s\n' "$(report_label "$check"):" "$color" "$level" "$reset" "$message"
+    [[ -z $remediation ]] || printf '%-34s %s\n' '  Remediation:' "$remediation"
   done
 
   printf '\n%s==============================================%s\n' "$blue" "$reset"
@@ -161,12 +214,16 @@ render_text() {
 }
 
 render_json() {
-  local i comma=
-  printf '{"tool":"host-security-audit","version":"%s","findings":[' "$(json_escape "$TOOLKIT_VERSION")"
+  local i comma='' details
+  printf '{"schema_version":2,"tool":"host-security-audit","version":"%s","findings":[' "$(json_escape "$TOOLKIT_VERSION")"
   for ((i = 0; i < ${#FINDING_LEVELS[@]}; i++)); do
-    printf '%s{"level":"%s","check":"%s","message":"%s"}' \
-      "$comma" "$(json_escape "${FINDING_LEVELS[$i]}")" \
-      "$(json_escape "${FINDING_CHECKS[$i]}")" "$(json_escape "${FINDING_MESSAGES[$i]}")"
+    details=${FINDING_DETAILS[$i]}
+    case $details in \{*\}|\[*\]) ;; *) details='{}' ;; esac
+    printf '%s{"id":"%s","level":"%s","check":"%s","summary":"%s","message":"%s","details":%s,"remediation":"%s"}' \
+      "$comma" "$(json_escape "${FINDING_CHECKS[$i]}")" \
+      "$(json_escape "${FINDING_LEVELS[$i]}")" \
+      "$(json_escape "${FINDING_CHECKS[$i]}")" "$(json_escape "${FINDING_MESSAGES[$i]}")" \
+      "$(json_escape "${FINDING_MESSAGES[$i]}")" "$details" "$(json_escape "${FINDING_REMEDIATIONS[$i]}")"
     comma=,
   done
   printf ']}\n'
@@ -174,6 +231,9 @@ render_json() {
 
 findings_exit_code() {
   local level
-  for level in "${FINDING_LEVELS[@]}"; do [[ $level == FAIL ]] && return 1; done
+  for level in "${FINDING_LEVELS[@]}"; do
+    [[ $level == FAIL ]] && return 1
+    [[ ${REPORT_FAIL_ON_LEVEL:-fail} == warn && $level == WARN ]] && return 1
+  done
   return 0
 }

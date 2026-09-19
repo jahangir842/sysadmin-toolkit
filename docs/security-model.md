@@ -12,13 +12,26 @@ Start from `config/example.conf`; never store client identifiers or secrets in
 this repo.
 
 Output includes hostnames, usernames, group memberships, SSH listen addresses,
-and a per-user table of password status, groups, and last login by default. The
-table covers accounts with UID 1000 or higher. Treat both text and JSON output
-as sensitive: restrict access, use mode-0600 when saving reports, limit
-retention, and transfer them only through an approved
-encrypted channel. Authentication events are emitted as aggregate counts; raw
+process identifiers, SSH public-key fingerprints, and a per-user table of
+password status, groups, and last login by default. The table covers root and
+interactive accounts at or above the host's configured `UID_MIN`. Treat both
+text and JSON output as sensitive: restrict access, use mode-0600 when saving
+reports, limit retention, and transfer them only through an approved encrypted
+channel. Authentication events are emitted as aggregate counts; raw
 authentication records are not included. The JSON stream contains no ANSI
 codes.
+
+Use `--redact-identifiers` when operational identifiers are unnecessary. This
+redacts hostnames, usernames, addresses, memberships, process data, login
+details, and key fingerprints, but does not make a report anonymous: package,
+service, platform, and policy information may still identify a host. Baseline
+files are read only and must receive the same protection as current reports.
+
+Filesystem discovery is restricted to the live root, does not cross filesystem
+boundaries, emits aggregate counts, and is bounded by `--timeout`. Package
+checks use APT simulation with locking disabled and do not refresh metadata or
+install packages. The audit does not change firewall, SSH, account, kernel,
+service, or package state.
 
 Findings are observations, not proof of security. In particular, port 22 is
 merely the SSH default; locked passwords do not disable every access method;
