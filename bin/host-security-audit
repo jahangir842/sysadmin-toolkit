@@ -87,17 +87,13 @@ audit_identity() {
 }
 
 interactive_accounts() {
-  local passwd_file shells_file name _ uid _ _ _ shell status groups last_login count=0
-  local table_header table_rule table_rows= message
-  passwd_file=$(root_path /etc/passwd); shells_file=$(root_path /etc/shells)
+  local passwd_file name _ uid _ _ _ shell status groups last_login count=0
+  local raw_login table_rows= message
+  passwd_file=$(root_path /etc/passwd)
   [[ -r $passwd_file ]] || { add_finding UNKNOWN accounts "cannot read account database"; return; }
-  printf -v table_header '%-18s %-12s %-36s %s' 'USERNAME' 'STATUS' 'GROUPS' 'LAST LOGIN'
-  printf -v table_rule '%*s' "${#table_header}" ''
-  table_rule=${table_rule// /-}
   while IFS=: read -r name _ uid _ _ _ shell; do
     [[ $uid =~ ^[0-9]+$ ]] && ((uid >= 1000)) || continue
-    [[ $uid != 65534 && -n $shell && $shell != */nologin && $shell != */false ]] || continue
-    if [[ -r $shells_file ]] && ! grep -Fxq "$shell" "$shells_file"; then continue; fi
+    [[ $uid != 65534 ]] || continue
     status=$(passwd -S "$name" 2>/dev/null | awk '{print $2}') || status=unknown
     case $status in
       P) status=ACTIVE ;;
@@ -107,15 +103,21 @@ interactive_accounts() {
     esac
     groups=$(id -nG "$name" 2>/dev/null) || groups=unknown
     if command_exists lastlog; then
-      last_login=$(lastlog -u "$name" 2>/dev/null | awk 'NR == 2 {sub(/^[^[:space:]]+[[:space:]]+/, ""); print; found=1} END {if (!found) print "unavailable"}')
+      raw_login=$(lastlog -u "$name" 2>/dev/null | awk 'NR == 2 {print; found=1} END {if (!found) print "unavailable"}')
+      if [[ $raw_login == *'Never logged in'* ]]; then
+        last_login=NEVER
+      elif [[ $raw_login == unavailable ]]; then
+        last_login=unavailable
+      else
+        last_login=$(awk '{$1=$2=$3=""; sub(/^[[:space:]]+/, ""); print}' <<<"$raw_login")
+      fi
     else
       last_login=unavailable
     fi
-    printf -v message '%-18s %-12s %-36s %s' "$name" "$status" "$groups" "$last_login"
-    table_rows+="$message"$'\n'
+    table_rows+="$name"$'\t'"$status"$'\t'"$groups"$'\t'"$last_login"$'\n'
     ((count += 1))
   done <"$passwd_file"
-  message="$count users found (UID >= 1000)"$'\n'"$table_header"$'\n'"$table_rule"
+  message="$count users found (UID >= 1000)"
   [[ -z $table_rows ]] || message+=$'\n'"${table_rows%$'\n'}"
   add_finding INFO accounts "$message"
 }
@@ -179,11 +181,11 @@ sshd_config() {
   level=PASS; [[ $password_auth == no ]] || level=$([[ $FAIL_ON_SSH_PASSWORD_AUTH == yes ]] && printf FAIL || printf WARN)
   add_finding "$level" ssh-password-auth "effective passwordauthentication=${password_auth:-unknown}; account password state alone does not determine this"
   if [[ $ports == 22 ]]; then
-    add_finding INFO ssh-listen "port 22 is the default, not automatically insecure"
+    add_finding INFO ssh-port "port 22 is the default, not automatically insecure"
   else
-    add_finding INFO ssh-listen "configured ports=${ports:-unknown}"
+    add_finding INFO ssh-port "configured ports=${ports:-unknown}"
   fi
-  add_finding INFO ssh-listen "configured listen addresses=${addresses:-default}"
+  add_finding INFO ssh-listen-addresses "configured listen addresses=${addresses:-default}"
   safe_summary=$(awk '$1 ~ /^(pubkeyauthentication|kbdinteractiveauthentication|x11forwarding|allowtcpforwarding|maxauthtries)$/ {printf "%s%s=%s", separator, $1, $2; separator=","}' <<<"$output")
   add_finding INFO ssh-effective "global effective settings: ${safe_summary:-no additional selected settings reported}"
   if [[ -n $SSH_USER ]]; then
@@ -197,7 +199,7 @@ sshd_config() {
 }
 
 network_checks() {
-  local output tcp udp
+  local output tcp udp status level
   command_exists ss || { add_finding UNKNOWN listeners "ss command is unavailable"; return; }
   output=$(ss -H -lntu 2>/dev/null) || { add_finding UNKNOWN listeners "unable to query listening sockets"; return; }
   tcp=$(awk '$1 == "tcp" && ($5 ~ /^\*:/ || $5 ~ /^0\.0\.0\.0:/ || $5 ~ /^\[::\]:/) {n++} END {print n+0}' <<<"$output")
@@ -205,7 +207,12 @@ network_checks() {
   add_finding WARN listeners "public/wildcard listeners: tcp=$tcp udp=$udp; exposure also depends on host and provider firewalls"
   if command_exists ufw; then
     output=$(ufw status 2>/dev/null) || { add_finding UNKNOWN firewall "UFW installed but status unavailable (root may be required)"; return; }
-    add_finding INFO firewall "$(awk 'NR == 1 {print; exit}' <<<"$output"); evaluate with listening addresses and provider-level firewalls"
+    status=$(awk 'NR == 1 {print tolower($2); exit}' <<<"$output")
+    case $status in
+      active) level=PASS; add_finding "$level" firewall "UFW is ACTIVE" ;;
+      inactive) level=WARN; add_finding "$level" firewall "UFW is INACTIVE; evaluate provider/network firewall rules" ;;
+      *) add_finding INFO firewall "$(awk 'NR == 1 {print; exit}' <<<"$output"); evaluate provider/network firewall rules" ;;
+    esac
   else
     add_finding INFO firewall "UFW is not installed; another host or provider firewall may apply"
   fi

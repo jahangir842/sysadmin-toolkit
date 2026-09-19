@@ -13,9 +13,9 @@ this repo.
 
 Output includes hostnames, usernames, group memberships, SSH listen addresses,
 and a per-user table of password status, groups, and last login by default. The
-table covers accounts with UID 1000 or higher and an interactive shell. Treat
-both text and JSON output as sensitive: restrict access, use mode-0600 when
-saving reports, limit retention, and transfer them only through an approved
+table covers accounts with UID 1000 or higher. Treat both text and JSON output
+as sensitive: restrict access, use mode-0600 when saving reports, limit
+retention, and transfer them only through an approved
 encrypted channel. Authentication events are emitted as aggregate counts; raw
 authentication records are not included. The JSON stream contains no ANSI
 codes.

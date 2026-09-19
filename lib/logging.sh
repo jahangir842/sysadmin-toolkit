@@ -17,10 +17,10 @@ json_escape() {
 
 report_section() {
   case $1 in
-    host|accounts|password-state|privileged-groups|last-login) printf 'HOST AND ACCOUNTS' ;;
-    ssh|ssh-root-login|ssh-password-auth|ssh-listen|ssh-effective|ssh-user-config) printf 'SSH SECURITY' ;;
-    listeners|firewall) printf 'NETWORK AND FIREWALL' ;;
-    fail2ban|ssh-auth-failures|system-errors|systemd) printf 'SERVICES AND SYSTEM LOGS' ;;
+    accounts|password-state|privileged-groups|last-login) printf 'AUDITING USER ACCOUNTS (UID >= 1000)...' ;;
+    ssh|ssh-root-login|ssh-password-auth|ssh-port|ssh-listen-addresses|ssh-effective|ssh-user-config) printf 'SSH SECURITY CONFIGURATION' ;;
+    listeners|firewall) printf 'NETWORK & FIREWALL STATUS' ;;
+    fail2ban|ssh-auth-failures|system-errors|systemd) printf 'SERVICES & SECURITY EVENTS' ;;
     *) printf 'OTHER CHECKS' ;;
   esac
 }
@@ -28,14 +28,15 @@ report_section() {
 report_label() {
   case $1 in
     host) printf 'Host' ;;
-    accounts) printf 'Human accounts (UID >= 1000)' ;;
+    accounts) printf 'Users found' ;;
     password-state) printf 'Account password status' ;;
     privileged-groups) printf 'Privileged group access' ;;
     last-login) printf 'Account login activity' ;;
     ssh) printf 'SSH configuration' ;;
     ssh-root-login) printf 'SSH root login' ;;
     ssh-password-auth) printf 'SSH password authentication' ;;
-    ssh-listen) printf 'SSH listening settings' ;;
+    ssh-port) printf 'SSH port' ;;
+    ssh-listen-addresses) printf 'SSH listen addresses' ;;
     ssh-effective) printf 'Effective SSH settings' ;;
     ssh-user-config) printf 'Per-user SSH settings' ;;
     listeners) printf 'Network listeners' ;;
@@ -48,12 +49,44 @@ report_label() {
   esac
 }
 
+level_color() {
+  [[ ${REPORT_COLORS:-no} == yes ]] || return 0
+  case $1 in
+    PASS) printf '\033[0;32m' ;;
+    WARN) printf '\033[1;33m' ;;
+    FAIL) printf '\033[0;31m' ;;
+    INFO) printf '\033[0;34m' ;;
+    UNKNOWN) printf '\033[0;35m' ;;
+  esac
+}
+
+render_account_table() {
+  local message=$1 reset=$2 green=$3 red=$4 yellow=$5
+  local summary rows= username status groups last_login status_color group_color
+  summary=${message%%$'\n'*}
+  printf '%s\n' "$summary"
+  printf '%-15s %-10s %-40s %s\n' 'USERNAME' 'STATUS' 'GROUPS' 'LAST LOGIN'
+  printf '%s\n' '------------------------------------------------------------------------------------------------'
+  [[ $message == *$'\n'* ]] || return 0
+  rows=${message#*$'\n'}
+  while IFS=$'\t' read -r username status groups last_login; do
+    status_color=$yellow
+    case $status in ACTIVE) status_color=$green ;; LOCKED|NO_PASSWORD) status_color=$red ;; esac
+    group_color=
+    [[ " $groups " == *' sudo '* || " $groups " == *' docker '* ]] && group_color=$red
+    printf '%-15s %s%-10s%s %s%-40s%s %s\n' \
+      "$username" "$status_color" "$status" "$reset" \
+      "$group_color" "$groups" "$reset" "$last_login"
+  done <<<"$rows"
+}
+
 render_text() {
-  local i level color reset bold title_color section previous_section= message summary detail_line details
+  local i level color reset blue yellow green red bold section previous_section= check message
+  local host_message= hostname=unknown timestamp=unknown os=unknown kernel=unknown uptime=unknown
   local pass_count=0 warn_count=0 fail_count=0 info_count=0 unknown_count=0
   local total=${#FINDING_LEVELS[@]}
-  local colors=no
-  if [[ -t 1 && ${NO_COLOR:-} == "" ]]; then colors=yes; fi
+  REPORT_COLORS=no
+  if [[ -t 1 && ${NO_COLOR:-} == "" ]]; then REPORT_COLORS=yes; fi
 
   for level in "${FINDING_LEVELS[@]}"; do
     case $level in
@@ -65,49 +98,66 @@ render_text() {
     esac
   done
 
-  if [[ $colors == yes ]]; then
-    bold=$'\033[1m'; reset=$'\033[0m'; title_color=$'\033[36m'
+  if [[ $REPORT_COLORS == yes ]]; then
+    red=$'\033[0;31m'; green=$'\033[0;32m'; yellow=$'\033[1;33m'
+    blue=$'\033[0;34m'; bold=$'\033[1m'; reset=$'\033[0m'
   else
-    bold=; reset=; title_color=
+    red=; green=; yellow=; blue=; bold=; reset=
   fi
-  printf '%s%s%s\n' "$bold" '============================================================' "$reset"
-  printf '%s%s%s\n' "$bold" '                 HOST SECURITY AUDIT REPORT' "$reset"
-  printf '%s%s%s\n' "$bold" '============================================================' "$reset"
-  printf 'Summary: %d findings  |  %d PASS  %d WARN  %d FAIL  %d INFO  %d UNKNOWN\n' \
-    "$total" "$pass_count" "$warn_count" "$fail_count" "$info_count" "$unknown_count"
+
+  for ((i = 0; i < total; i++)); do
+    if [[ ${FINDING_CHECKS[$i]} == host ]]; then host_message=${FINDING_MESSAGES[$i]}; break; fi
+  done
+  hostname=${host_message#*hostname=}; hostname=${hostname%% timestamp=*}
+  timestamp=${host_message#* timestamp=}; timestamp=${timestamp%% os=*}
+  os=${host_message#* os=}; os=${os%% kernel=*}
+  kernel=${host_message#* kernel=}; kernel=${kernel%% uptime=*}
+  uptime=${host_message#* uptime=}
+
+  printf '\n%s==============================================%s\n' "$blue" "$reset"
+  printf '%s        SYSTEM SECURITY AUDIT REPORT          %s\n' "$blue" "$reset"
+  printf '%s==============================================%s\n' "$blue" "$reset"
+  printf 'Date:     %s\n' "$timestamp"
+  printf 'Hostname: %s\n' "$hostname"
+  printf 'OS:       %s\n' "$os"
+  printf 'Kernel:   %s\n' "$kernel"
+  printf 'Uptime:   %s\n' "$uptime"
+  printf '%s\n' '----------------------------------------------'
+  printf 'Summary:  %s%d PASS%s  %s%d WARN%s  %s%d FAIL%s  %d INFO  %d UNKNOWN\n' \
+    "$green" "$pass_count" "$reset" "$yellow" "$warn_count" "$reset" \
+    "$red" "$fail_count" "$reset" "$info_count" "$unknown_count"
   if ((fail_count > 0)); then
-    printf 'Result: %sFAILURES NEED REVIEW%s\n' "$([[ $colors == yes ]] && printf '\033[31m\033[1m')" "$reset"
+    printf 'Result:   %s%sFAILURES NEED REVIEW%s\n' "$red" "$bold" "$reset"
   elif ((warn_count > 0 || unknown_count > 0)); then
-    printf 'Result: %sREVIEW RECOMMENDED%s\n' "$([[ $colors == yes ]] && printf '\033[33m\033[1m')" "$reset"
+    printf 'Result:   %s%sREVIEW RECOMMENDED%s\n' "$yellow" "$bold" "$reset"
   else
-    printf 'Result: No FAIL findings reported.\n'
+    printf 'Result:   %sNO FAIL FINDINGS%s\n' "$green" "$reset"
   fi
 
   for ((i = 0; i < total; i++)); do
     level=${FINDING_LEVELS[$i]}
-    section=$(report_section "${FINDING_CHECKS[$i]}")
+    check=${FINDING_CHECKS[$i]}
+    message=${FINDING_MESSAGES[$i]}
+    [[ $check == host ]] && continue
+    section=$(report_section "$check")
     if [[ $section != "$previous_section" ]]; then
-      printf '\n%s%s[%s]%s\n' "$title_color" "$bold" "$section" "$reset"
+      printf '\n%s[+] %s%s\n' "$yellow" "$section" "$reset"
+      printf '%s\n' '----------------------------------------------'
       previous_section=$section
     fi
 
-    color=
-    if [[ $colors == yes ]]; then
-      case $level in
-        PASS) color=$'\033[32m' ;; WARN) color=$'\033[33m' ;;
-        FAIL) color=$'\033[31m' ;; INFO) color=$'\033[36m' ;;
-        UNKNOWN) color=$'\033[35m' ;;
-      esac
+    if [[ $check == accounts ]]; then
+      render_account_table "$message" "$reset" "$green" "$red" "$yellow"
+      continue
     fi
-    message=${FINDING_MESSAGES[$i]}
-    summary=${message%%$'\n'*}
-    printf '  %s[%-7s]%s %-32s %s\n' "$color" "$level" "$reset" \
-      "$(report_label "${FINDING_CHECKS[$i]}"):" "$summary"
-    if [[ $message == *$'\n'* ]]; then
-      details=${message#*$'\n'}
-      while IFS= read -r detail_line; do printf '    %s\n' "$detail_line"; done <<<"$details"
-    fi
+
+    color=$(level_color "$level")
+    printf '%-34s %s%-7s%s %s\n' "$(report_label "$check"):" "$color" "$level" "$reset" "$message"
   done
+
+  printf '\n%s==============================================%s\n' "$blue" "$reset"
+  printf '%s              END OF REPORT                   %s\n' "$blue" "$reset"
+  printf '%s==============================================%s\n' "$blue" "$reset"
 }
 
 render_json() {

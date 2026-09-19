@@ -8,8 +8,7 @@ The first implemented command is `host-security-audit`. It reports observations
 as `PASS`, `WARN`, `FAIL`, `INFO`, or `UNKNOWN`; it never claims that a host is
 secure. The report includes hostnames, usernames, group memberships, SSH listen
 addresses, and a per-user table of password status, groups, and last login for
-accounts with UID 1000 or higher and an interactive shell. Protect the report
-as sensitive data.
+accounts with UID 1000 or higher. Protect the report as sensitive data.
 
 Text output is presented as a grouped report with a findings summary and uses
 colors in interactive terminals. Set `NO_COLOR=1` to disable colors. JSON output
