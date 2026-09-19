@@ -17,6 +17,9 @@ setup() { setup_audit_fixture; }
   run_audit --format xml
   [ "$status" -eq 2 ]
   [[ $output == *"format must be text or json"* ]]
+  run_audit --include-sensitive
+  [ "$status" -eq 2 ]
+  [[ $output == *"unknown option: --include-sensitive"* ]]
 }
 
 @test "missing configuration returns execution error" {
@@ -25,27 +28,21 @@ setup() { setup_audit_fixture; }
   [[ $output == *"configuration file not found"* ]]
 }
 
-@test "default output redacts identity values" {
+@test "default output includes per-user account details" {
   run_audit
-  [ "$status" -eq 0 ]
-  [[ $output != *"fixture-host"* ]]
-  [[ $output != *"alice"* ]]
-  [[ $output != *"198.51.100.10"* ]]
-  [[ $output == *"usernames and shells redacted"* ]]
-}
-
-@test "sensitive output requires explicit option" {
-  run_audit --include-sensitive
   [ "$status" -eq 0 ]
   [[ $output == *"fixture-host"* ]]
   [[ $output == *"alice"* ]]
+  [[ $output == *"198.51.100.10"* ]]
+  [[ $output == *"USERNAME"*"STATUS"*"GROUPS"*"LAST LOGIN"* ]]
+  [[ $output == *"alice"*"ACTIVE"* ]]
 }
 
 @test "password states use accurate classifications" {
-  run_audit --include-sensitive
+  run_audit
   [ "$status" -eq 0 ]
-  [[ $output == *"alice=password-set"* ]]
-  [[ $output == *"locked=password-locked"* ]]
+  [[ $output == *"alice"*"ACTIVE"* ]]
+  [[ $output == *"locked"*"LOCKED"* ]]
 }
 
 @test "no-password produces FAIL and exit one" {

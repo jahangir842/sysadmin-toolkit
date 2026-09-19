@@ -28,7 +28,7 @@ report_section() {
 report_label() {
   case $1 in
     host) printf 'Host' ;;
-    accounts) printf 'Interactive accounts' ;;
+    accounts) printf 'Human accounts (UID >= 1000)' ;;
     password-state) printf 'Account password status' ;;
     privileged-groups) printf 'Privileged group access' ;;
     last-login) printf 'Account login activity' ;;
@@ -49,7 +49,7 @@ report_label() {
 }
 
 render_text() {
-  local i level color reset bold title_color section previous_section=
+  local i level color reset bold title_color section previous_section message summary detail_line details
   local pass_count=0 warn_count=0 fail_count=0 info_count=0 unknown_count=0
   local total=${#FINDING_LEVELS[@]}
   local colors=no
@@ -99,8 +99,14 @@ render_text() {
         UNKNOWN) color=$'\033[35m' ;;
       esac
     fi
+    message=${FINDING_MESSAGES[$i]}
+    summary=${message%%$'\n'*}
     printf '  %s[%-7s]%s %-32s %s\n' "$color" "$level" "$reset" \
-      "$(report_label "${FINDING_CHECKS[$i]}"):" "${FINDING_MESSAGES[$i]}"
+      "$(report_label "${FINDING_CHECKS[$i]}"):" "$summary"
+    if [[ $message == *$'\n'* ]]; then
+      details=${message#*$'\n'}
+      while IFS= read -r detail_line; do printf '    %s\n' "$detail_line"; done <<<"$details"
+    fi
   done
 }
 
