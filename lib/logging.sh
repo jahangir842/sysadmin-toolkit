@@ -49,7 +49,7 @@ report_label() {
 }
 
 render_text() {
-  local i level color reset bold title_color section previous_section message summary detail_line details
+  local i level color reset bold title_color section previous_section= message summary detail_line details
   local pass_count=0 warn_count=0 fail_count=0 info_count=0 unknown_count=0
   local total=${#FINDING_LEVELS[@]}
   local colors=no

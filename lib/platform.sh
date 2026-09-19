@@ -5,8 +5,8 @@ detect_platform() {
   local os_file id like
   os_file=$(root_path /etc/os-release)
   [[ -r $os_file ]] || return 2
-  id=$(awk -F= '$1 == "ID" {gsub(/\"/, "", $2); print tolower($2)}' "$os_file")
-  like=$(awk -F= '$1 == "ID_LIKE" {gsub(/\"/, "", $2); print tolower($2)}' "$os_file")
+  id=$(awk -F= '$1 == "ID" {gsub(/"/, "", $2); print tolower($2)}' "$os_file")
+  like=$(awk -F= '$1 == "ID_LIKE" {gsub(/"/, "", $2); print tolower($2)}' "$os_file")
   case " $id $like " in
     *" debian "*|*" ubuntu "*) PLATFORM_ID=$id; return 0 ;;
     *) PLATFORM_ID=${id:-unknown}; return 1 ;;
