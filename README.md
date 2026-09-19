@@ -9,6 +9,10 @@ as `PASS`, `WARN`, `FAIL`, `INFO`, or `UNKNOWN`; it never claims that a host is
 secure. Sensitive authentication details are redacted unless
 `--include-sensitive` is explicitly supplied.
 
+Text output is presented as a grouped report with a findings summary and uses
+colors in interactive terminals. Set `NO_COLOR=1` to disable colors. JSON output
+remains available for automation.
+
 ```sh
 sudo /usr/local/sbin/host-security-audit --format text
 sudo /usr/local/sbin/host-security-audit --format json >audit.json
