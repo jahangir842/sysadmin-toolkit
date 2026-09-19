@@ -80,10 +80,19 @@ setup() { setup_audit_fixture; }
 }
 
 @test "JSON is valid and contains no ANSI escapes" {
-  run_audit --format json
-  [ "$status" -eq 0 ]
-  printf '%s' "$output" | jq -e '.tool == "host-security-audit" and (.findings | type == "array")'
-  [[ $output != *$'\033'* ]]
+  local json_file="$TEST_WORK_DIR/audit.json"
+  local stderr_file="$TEST_WORK_DIR/audit.stderr"
+  local audit_status
+
+  if "$REPO_ROOT/bin/host-security-audit" --format json >"$json_file" 2>"$stderr_file"; then
+    audit_status=0
+  else
+    audit_status=$?
+  fi
+
+  [ "$audit_status" -eq 0 ]
+  jq -e '.tool == "host-security-audit" and (.findings | type == "array")' "$json_file"
+  ! grep -q $'\033' "$json_file"
 }
 
 @test "failed systemd units produce exit one" {
