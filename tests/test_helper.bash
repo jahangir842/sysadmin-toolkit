@@ -1,7 +1,11 @@
 setup_audit_fixture() {
   export REPO_ROOT
   REPO_ROOT=$(CDPATH='' cd -- "$BATS_TEST_DIRNAME/.." && pwd)
-  TEST_WORK_DIR=${BATS_TEST_TMPDIR:-"${BATS_TMPDIR:-/tmp}/sysadmin-toolkit-bats-${BATS_TEST_NUMBER:-0}"}
+  if [[ -n ${BATS_TEST_TMPDIR:-} ]]; then
+    TEST_WORK_DIR=$BATS_TEST_TMPDIR
+  else
+    TEST_WORK_DIR=$(mktemp -d "${BATS_TMPDIR:-/tmp}/sysadmin-toolkit-bats-${BATS_TEST_NUMBER:-0}.XXXXXXXX")
+  fi
   export TEST_WORK_DIR
   export FIXTURE_ROOT="$TEST_WORK_DIR/root"
   export MOCK_BIN="$TEST_WORK_DIR/bin"
@@ -15,7 +19,8 @@ setup_audit_fixture() {
   export SYSADMIN_TOOLKIT_ROOT="$FIXTURE_ROOT"
   export SYSADMIN_TOOLKIT_TESTING=1
   export NO_COLOR=1
-  unset MOCK_EMPTY_PASSWORD MOCK_SYSTEMD_FAILED MOCK_SSH_INSECURE SYSADMIN_TOOLKIT_DISABLED_COMMANDS
+  unset MOCK_EMPTY_PASSWORD MOCK_SYSTEMD_FAILED MOCK_SSH_INSECURE MOCK_JOURNAL_FAILURE
+  unset SYSADMIN_TOOLKIT_DISABLED_COMMANDS
 }
 
 run_audit() {

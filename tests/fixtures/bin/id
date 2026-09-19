@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+if [[ ${1:-} == -nG ]]; then
+  case ${2:-} in
+    root) printf 'root\n' ;;
+    alice) printf 'alice sudo\n' ;;
+    locked) printf 'locked\n' ;;
+    primarypriv) printf 'sudo\n' ;;
+    *) exit 1 ;;
+  esac
+else
+  /usr/bin/id "$@"
+fi

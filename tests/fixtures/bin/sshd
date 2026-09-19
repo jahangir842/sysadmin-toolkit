@@ -6,3 +6,5 @@ else
 fi
 printf 'port 22\nlistenaddress 0.0.0.0:22\n'
 printf 'pubkeyauthentication yes\nkbdinteractiveauthentication no\nmaxauthtries 6\n'
+printf 'permitemptypasswords no\nusepam yes\ndisableforwarding yes\n'
+printf 'maxsessions 10\nlogingracetime 30\nclientaliveinterval 300\nclientalivecountmax 2\n'

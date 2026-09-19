@@ -1,2 +1,3 @@
 #!/usr/bin/env bash
 printf 'Status: active\n'
+printf 'Default: deny (incoming), allow (outgoing), disabled (routed)\n'

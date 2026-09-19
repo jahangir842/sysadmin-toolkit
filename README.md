@@ -7,8 +7,9 @@ operation explicitly implements both `--apply` and interactive confirmation.
 The first implemented command is `host-security-audit`. It reports observations
 as `PASS`, `WARN`, `FAIL`, `INFO`, or `UNKNOWN`; it never claims that a host is
 secure. The report includes hostnames, usernames, group memberships, SSH listen
-addresses, and a per-user table of password status, groups, and last login for
-accounts with UID 1000 or higher. Protect the report as sensitive data.
+addresses, process details, key fingerprints, and a per-user table of password
+status, groups, and last login for root and interactive accounts at or above
+`UID_MIN`. Protect the report as sensitive data.
 
 Text output is presented as a grouped report with a findings summary and uses
 colors in interactive terminals. Set `NO_COLOR=1` to disable colors. JSON output
@@ -18,11 +19,30 @@ remains available for automation.
 sudo /usr/local/sbin/host-security-audit --format text
 sudo /usr/local/sbin/host-security-audit --format json >audit.json
 sudo /usr/local/sbin/host-security-audit --ssh-user service-account
+sudo /usr/local/sbin/host-security-audit --profile server --fail-on warn
+sudo /usr/local/sbin/host-security-audit --redact-identifiers
+sudo /usr/local/sbin/host-security-audit --baseline previous-audit.json
 ```
 
 Exit status is `0` when there are no `FAIL` findings, `1` when one or more
 `FAIL` findings exist, and `2` for usage, configuration, platform, or execution
 errors. `WARN` and `UNKNOWN` do not change a successful exit status.
+
+The audit groups checks as `accounts`, `updates`, `ssh`, `network`,
+`confinement`, `filesystem`, and `services`. Use `--only` or `--skip` with a
+comma-separated list of those names. `--fail-on warn` makes warnings fail an
+automation run. `--redact-identifiers` suppresses hostnames, usernames,
+addresses, group membership details, process identifiers, and SSH-key
+fingerprints. `--baseline`/`--diff` compares check levels with a previous JSON
+report. Expensive discovery commands are bounded by `--timeout`.
+
+Coverage includes account and sudo policy, authorized keys, effective SSH
+configuration, listener and firewall state, security updates, reboot state,
+AppArmor and selected kernel controls, sensitive file permissions, privileged
+executables, mount/encryption indicators, persistence mechanisms, time
+synchronization, journal/audit status, and security events. Context-dependent
+observations remain `INFO` or `UNKNOWN` unless site policy makes them
+actionable.
 
 ## Running from a checkout
 
@@ -57,8 +77,10 @@ sudo unlink /usr/local/sbin/host-security-audit
 sudo rm -r /usr/local/lib/sysadmin-toolkit
 ```
 
-See [deployment](docs/deployment.md) and the [security model](docs/security-model.md).
-Contributions must pass `shellcheck` and `bats tests`.
+See [deployment](docs/deployment.md), the [security model](docs/security-model.md),
+and the [report visual hierarchy](docs/reporting-style.md). New commands should
+follow the shared report hierarchy and use `lib/logging.sh` for common rendering
+behavior. Contributions must pass `shellcheck` and `bats tests`.
 
 ## Commands
 

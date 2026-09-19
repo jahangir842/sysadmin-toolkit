@@ -14,10 +14,22 @@ source "$LIB_DIR/platform.sh" || exit 2
 FORMAT=text
 CONFIG_FILE=
 SSH_USER=
+PROFILE=server
+ONLY_CHECKS=
+SKIP_CHECKS=
+BASELINE_FILE=
+REDACT_IDENTIFIERS=no
+AUDIT_TIMEOUT=20
+REPORT_FAIL_ON_LEVEL=fail
 PRIVILEGED_GROUPS=(sudo docker)
 AUTH_FAILURE_SINCE="24 hours ago"
 FAIL_ON_SSH_ROOT_LOGIN=yes
 FAIL_ON_SSH_PASSWORD_AUTH=no
+EXPECTED_TCP_LISTENERS=
+EXPECTED_UDP_LISTENERS=
+FAIL_ON_UNEXPECTED_LISTENER=no
+MAX_APT_METADATA_AGE_HOURS=48
+MAX_DORMANT_DAYS=90
 
 usage() {
   cat <<'EOF'
@@ -29,6 +41,14 @@ include host and account identifiers by default.
   --format text|json       Output format (default: text)
   --config FILE            Load root-owned site expectations
   --ssh-user USER          Evaluate effective SSH configuration for USER
+  --profile PROFILE        server, workstation, or container-host (default: server)
+  --only CHECKS            Run only comma-separated check groups
+  --skip CHECKS            Skip comma-separated check groups
+  --fail-on fail|warn      Exit 1 at this severity threshold (default: fail)
+  --redact-identifiers     Redact host, user, address, and key identifiers
+  --baseline FILE          Compare findings with a previous JSON report
+  --diff FILE              Alias for --baseline
+  --timeout SECONDS        Per-command/discovery timeout (default: 20)
   --help                   Show this help
   --version                Show version
 
@@ -50,6 +70,25 @@ parse_args() {
       --ssh-user)
         (($# >= 2)) || die "--ssh-user requires a user"
         SSH_USER=$2; shift 2 ;;
+      --profile)
+        (($# >= 2)) || die "--profile requires a value"
+        PROFILE=$2; shift 2 ;;
+      --only)
+        (($# >= 2)) || die "--only requires a value"
+        ONLY_CHECKS=$2; shift 2 ;;
+      --skip)
+        (($# >= 2)) || die "--skip requires a value"
+        SKIP_CHECKS=$2; shift 2 ;;
+      --fail-on)
+        (($# >= 2)) || die "--fail-on requires a value"
+        REPORT_FAIL_ON_LEVEL=$2; shift 2 ;;
+      --redact-identifiers) REDACT_IDENTIFIERS=yes; shift ;;
+      --baseline|--diff)
+        (($# >= 2)) || die "$1 requires a file"
+        BASELINE_FILE=$2; shift 2 ;;
+      --timeout)
+        (($# >= 2)) || die "--timeout requires a value"
+        AUDIT_TIMEOUT=$2; shift 2 ;;
       --apply) die "this audit is read-only; --apply is not supported" ;;
       --) shift; (($# == 0)) || die "unexpected positional arguments" ;;
       -*) die "unknown option: $1" ;;
@@ -57,7 +96,15 @@ parse_args() {
     esac
   done
   [[ $FORMAT == text || $FORMAT == json ]] || die "format must be text or json"
+  [[ $PROFILE == server || $PROFILE == workstation || $PROFILE == container-host ]] ||
+    die "profile must be server, workstation, or container-host"
+  [[ $REPORT_FAIL_ON_LEVEL == fail || $REPORT_FAIL_ON_LEVEL == warn ]] ||
+    die "fail-on must be fail or warn"
+  [[ $AUDIT_TIMEOUT =~ ^[1-9][0-9]*$ ]] || die "timeout must be a positive integer"
   [[ -z $SSH_USER ]] || is_safe_name "$SSH_USER" || die "invalid SSH user name"
+  [[ -z $BASELINE_FILE || -f $BASELINE_FILE ]] || die "baseline file not found: $BASELINE_FILE"
+  validate_check_list "$ONLY_CHECKS"
+  validate_check_list "$SKIP_CHECKS"
 }
 
 apply_config_value() {
@@ -72,13 +119,62 @@ apply_config_value() {
       [[ $value == yes || $value == no ]] && FAIL_ON_SSH_ROOT_LOGIN=$value ;;
     FAIL_ON_SSH_PASSWORD_AUTH)
       [[ $value == yes || $value == no ]] && FAIL_ON_SSH_PASSWORD_AUTH=$value ;;
+    EXPECTED_TCP_LISTENERS) EXPECTED_TCP_LISTENERS=$value ;;
+    EXPECTED_UDP_LISTENERS) EXPECTED_UDP_LISTENERS=$value ;;
+    FAIL_ON_UNEXPECTED_LISTENER)
+      [[ $value == yes || $value == no ]] && FAIL_ON_UNEXPECTED_LISTENER=$value ;;
+    MAX_APT_METADATA_AGE_HOURS)
+      [[ $value =~ ^[0-9]+$ ]] && MAX_APT_METADATA_AGE_HOURS=$value ;;
+    MAX_DORMANT_DAYS)
+      [[ $value =~ ^[0-9]+$ ]] && MAX_DORMANT_DAYS=$value ;;
     *) return 1 ;;
   esac
+}
+
+list_contains() {
+  local list=${1//,/ } wanted=$2 item
+  for item in $list; do [[ $item == "$wanted" ]] && return 0; done
+  return 1
+}
+
+validate_check_list() {
+  local list=${1//,/ } item
+  for item in $list; do
+    case $item in accounts|updates|ssh|network|confinement|filesystem|services) ;;
+      *) die "unknown check group: $item" ;;
+    esac
+  done
+}
+
+check_enabled() {
+  local name=$1
+  [[ -z $ONLY_CHECKS ]] || list_contains "$ONLY_CHECKS" "$name" || return 1
+  [[ -z $SKIP_CHECKS ]] || ! list_contains "$SKIP_CHECKS" "$name"
+}
+
+run_timed() {
+  if command_exists timeout; then
+    timeout --preserve-status "$AUDIT_TIMEOUT" "$@"
+  else
+    "$@"
+  fi
+}
+
+display_identifier() {
+  if [[ $REDACT_IDENTIFIERS == yes ]]; then printf '<redacted>'; else printf '%s' "$1"; fi
+}
+
+json_string() { printf '"%s"' "$(json_escape "$1")"; }
+
+json_number_details() {
+  local key=$1 value=$2
+  printf '{"%s":%s}' "$(json_escape "$key")" "$value"
 }
 
 audit_identity() {
   local host now kernel up os
   host=$(hostname 2>/dev/null) || host=unknown
+  host=$(display_identifier "$host")
   now=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || now=unknown
   kernel=$(uname -r 2>/dev/null) || kernel=unknown
   up=$(uptime -p 2>/dev/null) || up=unknown
@@ -86,14 +182,27 @@ audit_identity() {
   add_finding INFO host "hostname=$host timestamp=$now os=$os kernel=$kernel uptime=$up"
 }
 
+is_interactive_shell() {
+  local shell=$1 shells_file
+  shells_file=$(root_path /etc/shells)
+  [[ $shell != */nologin && $shell != */false ]] || return 1
+  [[ ! -r $shells_file ]] || grep -Fxq -- "$shell" "$shells_file"
+}
+
 interactive_accounts() {
-  local passwd_file name _ uid _ _ _ shell status groups last_login count=0
-  local raw_login table_rows= message
+  local passwd_file login_defs name _ uid _ _ _ shell status groups last_login count=0 uid_min=1000
+  local raw_login table_rows='' message details='{"accounts":[' comma='' display_name display_groups display_login
   passwd_file=$(root_path /etc/passwd)
+  login_defs=$(root_path /etc/login.defs)
   [[ -r $passwd_file ]] || { add_finding UNKNOWN accounts "cannot read account database"; return; }
+  if [[ -r $login_defs ]]; then
+    uid_min=$(awk '$1 == "UID_MIN" && $2 ~ /^[0-9]+$/ {print $2; exit}' "$login_defs")
+    uid_min=${uid_min:-1000}
+  fi
   while IFS=: read -r name _ uid _ _ _ shell; do
-    [[ $uid =~ ^[0-9]+$ ]] && ((uid >= 1000)) || continue
+    if [[ ! $uid =~ ^[0-9]+$ ]] || ((uid != 0 && uid < uid_min)); then continue; fi
     [[ $uid != 65534 ]] || continue
+    is_interactive_shell "$shell" || continue
     status=$(passwd -S "$name" 2>/dev/null | awk '{print $2}') || status=unknown
     case $status in
       P) status=ACTIVE ;;
@@ -103,23 +212,29 @@ interactive_accounts() {
     esac
     groups=$(id -nG "$name" 2>/dev/null) || groups=unknown
     if command_exists lastlog; then
-      raw_login=$(lastlog -u "$name" 2>/dev/null | awk 'NR == 2 {print; found=1} END {if (!found) print "unavailable"}')
+      raw_login=$(LC_ALL=C lastlog -u "$name" 2>/dev/null | awk 'NR == 2 {print; found=1} END {if (!found) print "unavailable"}')
       if [[ $raw_login == *'Never logged in'* ]]; then
         last_login=NEVER
       elif [[ $raw_login == unavailable ]]; then
         last_login=unavailable
       else
-        last_login=$(awk '{$1=$2=$3=""; sub(/^[[:space:]]+/, ""); print}' <<<"$raw_login")
+        last_login=$(awk '{$1=""; sub(/^[[:space:]]+/, ""); print}' <<<"$raw_login")
       fi
     else
       last_login=unavailable
     fi
-    table_rows+="$name"$'\t'"$status"$'\t'"$groups"$'\t'"$last_login"$'\n'
+    display_name=$(display_identifier "$name")
+    display_groups=$(display_identifier "$groups")
+    display_login=$(display_identifier "$last_login")
+    table_rows+="$display_name"$'\t'"$status"$'\t'"$display_groups"$'\t'"$display_login"$'\n'
+    details+="$comma"'{"username":'"$(json_string "$display_name")"',"uid":'"$uid"',"status":'"$(json_string "$status")"',"groups":'"$(json_string "$display_groups")"',"last_login":'"$(json_string "$display_login")"'}'
+    comma=,
     ((count += 1))
   done <"$passwd_file"
-  message="$count users found (UID >= 1000)"
+  details+=']}'
+  message="$count interactive users found (root or UID >= $uid_min)"
   [[ -z $table_rows ]] || message+=$'\n'"${table_rows%$'\n'}"
-  add_finding INFO accounts "$message"
+  add_finding INFO accounts "$message" "$details"
 }
 
 classify_password_status() {
@@ -137,7 +252,7 @@ password_states() {
   fi
   command_exists passwd || { add_finding UNKNOWN password-state "passwd command is unavailable"; return; }
   while IFS=: read -r name _ _ _ _ _ shell; do
-    [[ $shell != */nologin && $shell != */false ]] || continue
+    is_interactive_shell "$shell" || continue
     status=$(passwd -S "$name" 2>/dev/null | awk '{print $2}') || status=unknown
     label=$(classify_password_status "$status"); ((total += 1))
     case $label in password-set) ((set_count += 1));; password-locked) ((locked += 1));; no-password) ((empty += 1));; *) ((unknown += 1));; esac
@@ -147,79 +262,564 @@ password_states() {
 }
 
 privileged_groups() {
-  local group entry members count
+  local group entry members passwd_file name _ gid groups all_members
+  passwd_file=$(root_path /etc/passwd)
   for group in "${PRIVILEGED_GROUPS[@]}"; do
     is_safe_name "$group" || die "invalid privileged group in configuration: $group"
     if ! entry=$(getent group "$group" 2>/dev/null); then
       add_finding INFO privileged-groups "group $group is not present"
       continue
     fi
-    members=${entry##*:}; count=0
-    [[ -z $members ]] || count=$(awk -F, '{print NF}' <<<"$members")
-    add_finding WARN privileged-groups "group=$group members=${members:-none}; membership may grant elevated access"
+    gid=$(awk -F: '{print $3}' <<<"$entry")
+    members=${entry##*:}
+    all_members=$members
+    while IFS=: read -r name _ _ _ _ _ _; do
+      groups=$(id -nG "$name" 2>/dev/null) || groups=
+      if [[ " $groups " == *" $group "* ]]; then
+        [[ ",$all_members," == *",$name,"* ]] || all_members=${all_members:+$all_members,}$name
+      fi
+    done <"$passwd_file"
+    members=$(display_identifier "${all_members:-none}")
+    add_finding WARN privileged-groups "group=$group gid=$gid members=$members; membership may grant elevated access"
   done
 }
 
 last_logins() {
   local output lines
   command_exists lastlog || { add_finding UNKNOWN last-login "lastlog command is unavailable"; return; }
-  output=$(lastlog 2>/dev/null) || { add_finding UNKNOWN last-login "last-login data unavailable"; return; }
+  output=$(LC_ALL=C lastlog 2>/dev/null) || { add_finding UNKNOWN last-login "last-login data unavailable"; return; }
   lines=$(awk 'NR > 1 && $0 !~ /Never logged in/ {count++} END {print count+0}' <<<"$output")
   add_finding INFO last-login "accounts with recorded login=$lines; per-user details are shown in the account table when available"
 }
 
+account_integrity_checks() {
+  local passwd_file group_file duplicate_uids duplicate_gids uid0
+  passwd_file=$(root_path /etc/passwd)
+  group_file=$(root_path /etc/group)
+  [[ -r $passwd_file ]] || { add_finding UNKNOWN account-identifiers "cannot read account database"; return; }
+  duplicate_uids=$(awk -F: '$3 ~ /^[0-9]+$/ {n[$3]++} END {for (i in n) if (n[i] > 1) c++} END {print c+0}' "$passwd_file")
+  uid0=$(awk -F: '$3 == 0 {n++} END {print n+0}' "$passwd_file")
+  if [[ -r $group_file ]]; then
+    duplicate_gids=$(awk -F: '$3 ~ /^[0-9]+$/ {n[$3]++} END {for (i in n) if (n[i] > 1) c++} END {print c+0}' "$group_file")
+  else
+    duplicate_gids=unknown
+  fi
+  if ((duplicate_uids > 0 || uid0 > 1)); then
+    add_finding FAIL account-identifiers "duplicate-uids=$duplicate_uids uid-zero-accounts=$uid0 duplicate-gids=$duplicate_gids" \
+      '{"duplicate_uids":'"$duplicate_uids"',"uid_zero_accounts":'"$uid0"'}' \
+      "Remove unintended duplicate identifiers and additional UID 0 accounts."
+  else
+    add_finding PASS account-identifiers "duplicate-uids=0 uid-zero-accounts=1 duplicate-gids=$duplicate_gids"
+  fi
+}
+
+account_aging_checks() {
+  local shadow_file now_day name hash changed _minimum maximum _warning _inactive expire _ expired=0 stale=0 dormant=0 output
+  shadow_file=$(root_path /etc/shadow)
+  [[ -r $shadow_file ]] || { add_finding UNKNOWN account-aging "shadow database is unavailable; expiration and aging not evaluated"; return; }
+  now_day=$(( $(date +%s) / 86400 ))
+  while IFS=: read -r name hash changed _minimum maximum _warning _inactive expire _; do
+    [[ $hash == '!'* || $hash == '*'* ]] && continue
+    [[ $expire =~ ^[0-9]+$ && $expire -gt 0 && $expire -lt $now_day ]] && ((expired += 1))
+    if [[ $changed =~ ^[0-9]+$ && $maximum =~ ^[0-9]+$ && $maximum -gt 0 &&
+          $((now_day - changed)) -gt $maximum ]]; then
+      ((stale += 1))
+    fi
+  done <"$shadow_file"
+  if command_exists lastlog; then
+    output=$(LC_ALL=C lastlog -b "$MAX_DORMANT_DAYS" 2>/dev/null) || output=
+    dormant=$(awk 'NR > 1 && $0 !~ /Never logged in/ && NF {n++} END {print n+0}' <<<"$output")
+  fi
+  if ((expired > 0 || stale > 0 || dormant > 0)); then
+    add_finding WARN account-aging "expired-accounts=$expired passwords-past-maximum-age=$stale dormant-logins=$dormant threshold-days=$MAX_DORMANT_DAYS" \
+      '{"expired_accounts":'"$expired"',"stale_passwords":'"$stale"',"dormant_logins":'"$dormant"'}' \
+      "Review expired and dormant accounts against the site's account lifecycle policy."
+  else
+    add_finding PASS account-aging "no expired accounts or passwords past configured maximum age found"
+  fi
+}
+
+sudo_checks() {
+  local sudoers sudo_dir output nopasswd=0 unrestricted=0 bad_files=0 file mode owner
+  sudoers=$(root_path /etc/sudoers)
+  sudo_dir=$(root_path /etc/sudoers.d)
+  [[ -e $sudoers || -d $sudo_dir ]] || { add_finding INFO sudo "sudo policy files are not present"; return; }
+  if [[ -d $sudo_dir ]]; then
+    owner=$(stat -c '%u' "$sudo_dir" 2>/dev/null) || owner=-1
+    mode=$(stat -c '%a' "$sudo_dir" 2>/dev/null) || mode=777
+    if [[ ${SYSADMIN_TOOLKIT_TESTING:-0} != 1 ]]; then
+      ((owner == 0 && (8#$mode & 8#022) == 0)) || ((bad_files += 1))
+    fi
+  fi
+  while IFS= read -r file; do
+    [[ -f $file ]] || continue
+    owner=$(stat -c '%u' "$file" 2>/dev/null) || { ((bad_files += 1)); continue; }
+    mode=$(stat -c '%a' "$file" 2>/dev/null) || { ((bad_files += 1)); continue; }
+    [[ $owner == 0 && $((8#$mode & 8#022)) -eq 0 ]] || ((bad_files += 1))
+    output=$(grep -Evc '^[[:space:]]*(#|$)' "$file" 2>/dev/null) || output=0
+    if ((output > 0)); then
+      output=$(grep -Eic '(^|[[:space:],:])NOPASSWD:' "$file" 2>/dev/null) || output=0
+      ((nopasswd += output))
+      output=$(grep -Eic 'ALL[[:space:]]*=[[:space:]]*(\([^)]*\)[[:space:]]*)?(NOPASSWD:[[:space:]]*)?ALL([[:space:]]|$)' "$file" 2>/dev/null) || output=0
+      ((unrestricted += output))
+    fi
+  done < <(find "$sudoers" "$sudo_dir" -maxdepth 1 -type f 2>/dev/null)
+  if command_exists visudo && [[ -z ${SYSADMIN_TOOLKIT_ROOT:-} ]]; then
+    if ! output=$(run_timed visudo -c 2>&1); then
+      add_finding FAIL sudo "sudoers syntax validation failed; nopasswd-rules=$nopasswd unrestricted-rules=$unrestricted permission-issues=$bad_files" '{}' \
+        "Run visudo -c and correct policy syntax and ownership."
+      return
+    fi
+  fi
+  add_finding "$([[ $bad_files -eq 0 ]] && printf INFO || printf FAIL)" sudo \
+    "sudoers syntax=$([[ -n ${output:-} ]] && printf checked || printf not-checked) nopasswd-rules=$nopasswd unrestricted-rules=$unrestricted permission-issues=$bad_files" \
+    '{"nopasswd_rules":'"$nopasswd"',"unrestricted_rules":'"$unrestricted"',"permission_issues":'"$bad_files"'}' \
+    "Review NOPASSWD and unrestricted command grants; fix any policy-file permission issues."
+}
+
+authorized_key_checks() {
+  local passwd_file name _ uid _ _ home shell ssh_dir key_file line fingerprint count=0 bad=0 obsolete=0 details='' display_name mode owner
+  passwd_file=$(root_path /etc/passwd)
+  [[ -r $passwd_file ]] || { add_finding UNKNOWN authorized-keys "cannot read account database"; return; }
+  while IFS=: read -r name _ uid _ _ home shell; do
+    [[ $uid =~ ^[0-9]+$ ]] || continue
+    is_interactive_shell "$shell" || continue
+    ssh_dir=$(root_path "$home/.ssh")
+    key_file="$ssh_dir/authorized_keys"
+    [[ -f $key_file ]] || continue
+    mode=$(stat -c '%a' "$ssh_dir" 2>/dev/null) || mode=777
+    owner=$(stat -c '%u' "$ssh_dir" 2>/dev/null) || owner=-1
+    (( (8#$mode & 8#022) == 0 && owner == uid )) || ((bad += 1))
+    mode=$(stat -c '%a' "$key_file" 2>/dev/null) || mode=777
+    owner=$(stat -c '%u' "$key_file" 2>/dev/null) || owner=-1
+    (( (8#$mode & 8#022) == 0 && owner == uid )) || ((bad += 1))
+    while IFS= read -r line; do
+      [[ $line == ssh-*' '* || $line == ecdsa-*' '* || $line == sk-*' '* ]] || continue
+      ((count += 1))
+      [[ $line == ssh-dss' '* ]] && ((obsolete += 1))
+      if command_exists ssh-keygen; then
+        fingerprint=$(printf '%s\n' "$line" | ssh-keygen -lf - 2>/dev/null | awk '{print $2" "$4}') || fingerprint=unreadable
+      else
+        fingerprint=unavailable
+      fi
+      display_name=$(display_identifier "$name")
+      fingerprint=$(display_identifier "$fingerprint")
+      details+=${details:+,}"$display_name:$fingerprint"
+    done <"$key_file"
+  done <"$passwd_file"
+  add_finding "$([[ $bad -eq 0 ]] && printf INFO || printf WARN)" authorized-keys \
+    "authorized-keys=$count obsolete-key-types=$obsolete permission-issues=$bad fingerprints=${details:-none}" \
+    '{"key_count":'"$count"',"obsolete_key_types":'"$obsolete"',"permission_issues":'"$bad"'}' \
+    "Remove unrecognized keys and restrict .ssh and authorized_keys ownership and modes."
+}
+
 sshd_config() {
-  local output user_output root_login password_auth ports addresses level safe_summary
+  local output user_output root_login password_auth empty_passwords ports addresses level safe_summary
   command_exists sshd || { add_finding UNKNOWN ssh "sshd command is unavailable; effective configuration not evaluated"; return; }
-  output=$(sshd -T 2>/dev/null) || { add_finding UNKNOWN ssh "sshd rejected global effective-configuration query"; return; }
+  output=$(run_timed sshd -T 2>/dev/null) || { add_finding UNKNOWN ssh "sshd rejected global effective-configuration query"; return; }
   root_login=$(awk '$1 == "permitrootlogin" {print $2; exit}' <<<"$output")
   password_auth=$(awk '$1 == "passwordauthentication" {print $2; exit}' <<<"$output")
+  empty_passwords=$(awk '$1 == "permitemptypasswords" {print $2; exit}' <<<"$output")
   ports=$(awk '$1 == "port" {print $2}' <<<"$output" | paste -sd, -)
   addresses=$(awk '$1 == "listenaddress" {print $2}' <<<"$output" | paste -sd, -)
-  level=PASS; [[ $root_login == no ]] || level=$([[ $FAIL_ON_SSH_ROOT_LOGIN == yes ]] && printf FAIL || printf WARN)
+  if [[ -z $root_login ]]; then level=UNKNOWN
+  else level=PASS; [[ $root_login == no ]] || level=$([[ $FAIL_ON_SSH_ROOT_LOGIN == yes ]] && printf FAIL || printf WARN); fi
   add_finding "$level" ssh-root-login "effective permitrootlogin=${root_login:-unknown}; non-no values require contextual review"
-  level=PASS; [[ $password_auth == no ]] || level=$([[ $FAIL_ON_SSH_PASSWORD_AUTH == yes ]] && printf FAIL || printf WARN)
+  if [[ -z $password_auth ]]; then level=UNKNOWN
+  else level=PASS; [[ $password_auth == no ]] || level=$([[ $FAIL_ON_SSH_PASSWORD_AUTH == yes ]] && printf FAIL || printf WARN); fi
   add_finding "$level" ssh-password-auth "effective passwordauthentication=${password_auth:-unknown}; account password state alone does not determine this"
+  case $empty_passwords in
+    no) add_finding PASS ssh-empty-passwords "effective permitemptypasswords=no" ;;
+    yes) add_finding FAIL ssh-empty-passwords "effective permitemptypasswords=yes" '{}' "Set PermitEmptyPasswords no." ;;
+    *) add_finding UNKNOWN ssh-empty-passwords "effective permitemptypasswords=unknown" ;;
+  esac
   if [[ $ports == 22 ]]; then
     add_finding INFO ssh-port "port 22 is the default, not automatically insecure"
   else
     add_finding INFO ssh-port "configured ports=${ports:-unknown}"
   fi
-  add_finding INFO ssh-listen-addresses "configured listen addresses=${addresses:-default}"
-  safe_summary=$(awk '$1 ~ /^(pubkeyauthentication|kbdinteractiveauthentication|x11forwarding|allowtcpforwarding|maxauthtries)$/ {printf "%s%s=%s", separator, $1, $2; separator=","}' <<<"$output")
+  addresses=$(display_identifier "${addresses:-default}")
+  add_finding INFO ssh-listen-addresses "configured listen addresses=$addresses"
+  safe_summary=$(awk '$1 ~ /^(pubkeyauthentication|kbdinteractiveauthentication|authenticationmethods|usepam|x11forwarding|allowtcpforwarding|disableforwarding|permituserenvironment|maxauthtries|maxsessions|logingracetime|clientaliveinterval|clientalivecountmax|allowusers|allowgroups|denyusers|denygroups|authorizedkeyscommand)$/ {printf "%s%s=%s", separator, $1, $2; separator=","}' <<<"$output")
+  [[ $REDACT_IDENTIFIERS != yes ]] || safe_summary='<redacted>'
   add_finding INFO ssh-effective "global effective settings: ${safe_summary:-no additional selected settings reported}"
   if [[ -n $SSH_USER ]]; then
-    user_output=$(sshd -T -C "user=$SSH_USER,host=localhost,addr=127.0.0.1" 2>/dev/null) || {
+    user_output=$(run_timed sshd -T -C "user=$SSH_USER,host=localhost,addr=127.0.0.1" 2>/dev/null) || {
       add_finding UNKNOWN ssh-user-config "sshd rejected per-user effective-configuration query"
       return
     }
-    safe_summary=$(awk '$1 ~ /^(permitrootlogin|passwordauthentication|pubkeyauthentication|kbdinteractiveauthentication|x11forwarding|allowtcpforwarding|maxauthtries)$/ {printf "%s%s=%s", separator, $1, $2; separator=","}' <<<"$user_output")
+    safe_summary=$(awk '$1 ~ /^(permitrootlogin|passwordauthentication|permitemptypasswords|pubkeyauthentication|kbdinteractiveauthentication|authenticationmethods|usepam|x11forwarding|allowtcpforwarding|disableforwarding|permituserenvironment|maxauthtries|maxsessions|logingracetime|clientaliveinterval|clientalivecountmax)$/ {printf "%s%s=%s", separator, $1, $2; separator=","}' <<<"$user_output")
+    [[ $REDACT_IDENTIFIERS != yes ]] || safe_summary='<redacted>'
     add_finding INFO ssh-user-config "per-user effective settings evaluated for explicitly requested user: ${safe_summary:-selected settings unavailable}"
   fi
 }
 
 network_checks() {
-  local output tcp udp status level
+  local output tcp=0 udp=0 status level protocol local_address port process public=0 unexpected=0 rows='' expected
   command_exists ss || { add_finding UNKNOWN listeners "ss command is unavailable"; return; }
-  output=$(ss -H -lntu 2>/dev/null) || { add_finding UNKNOWN listeners "unable to query listening sockets"; return; }
-  tcp=$(awk '$1 == "tcp" && ($5 ~ /^\*:/ || $5 ~ /^0\.0\.0\.0:/ || $5 ~ /^\[::\]:/) {n++} END {print n+0}' <<<"$output")
-  udp=$(awk '$1 == "udp" && ($5 ~ /^\*:/ || $5 ~ /^0\.0\.0\.0:/ || $5 ~ /^\[::\]:/) {n++} END {print n+0}' <<<"$output")
-  add_finding WARN listeners "public/wildcard listeners: tcp=$tcp udp=$udp; exposure also depends on host and provider firewalls"
+  output=$(run_timed ss -H -lntup 2>/dev/null) || { add_finding UNKNOWN listeners "unable to query listening sockets"; return; }
+  while read -r protocol _ _ _ local_address _ process; do
+    [[ -n $protocol && -n $local_address ]] || continue
+    port=${local_address##*:}
+    case $protocol in
+      tcp) ((tcp += 1)); expected=$EXPECTED_TCP_LISTENERS ;;
+      udp) ((udp += 1)); expected=$EXPECTED_UDP_LISTENERS ;;
+      *) continue ;;
+    esac
+    [[ $local_address == \*:* || $local_address == 0.0.0.0:* || $local_address == \[::\]:* ]] && ((public += 1))
+    if [[ -n $expected ]] && ! list_contains "$expected" "$port"; then ((unexpected += 1)); fi
+    local_address=$(display_identifier "$local_address")
+    process=$(display_identifier "${process:-unknown}")
+    rows+=${rows:+;}"$protocol $local_address process=$process"
+  done <<<"$output"
+  if ((unexpected > 0)); then
+    level=$([[ $FAIL_ON_UNEXPECTED_LISTENER == yes ]] && printf FAIL || printf WARN)
+  elif ((public > 0)); then level=WARN
+  else level=PASS
+  fi
+  add_finding "$level" listeners \
+    "listeners: tcp=$tcp udp=$udp wildcard=$public unexpected=$unexpected; ${rows:-none}; exposure also depends on network firewalls" \
+    '{"tcp":'"$tcp"',"udp":'"$udp"',"wildcard":'"$public"',"unexpected":'"$unexpected"'}' \
+    "Remove unexpected services or restrict their bind addresses and firewall reachability."
   if command_exists ufw; then
-    output=$(ufw status 2>/dev/null) || { add_finding UNKNOWN firewall "UFW installed but status unavailable (root may be required)"; return; }
+    output=$(run_timed ufw status verbose 2>/dev/null) || { add_finding UNKNOWN firewall "UFW installed but status unavailable (root may be required)"; return; }
     status=$(awk 'NR == 1 {print tolower($2); exit}' <<<"$output")
     case $status in
-      active) level=PASS; add_finding "$level" firewall "UFW is ACTIVE" ;;
-      inactive) level=WARN; add_finding "$level" firewall "UFW is INACTIVE; evaluate provider/network firewall rules" ;;
+      active)
+        if grep -Eiq '^Default:[[:space:]]+deny' <<<"$output"; then
+          add_finding PASS firewall "UFW is ACTIVE with a deny default policy"
+        else
+          add_finding INFO firewall "UFW is ACTIVE; default policy was not confirmed as deny"
+        fi ;;
+      inactive) add_finding WARN firewall "UFW is INACTIVE; evaluate provider/network firewall rules" ;;
       *) add_finding INFO firewall "$(awk 'NR == 1 {print; exit}' <<<"$output"); evaluate provider/network firewall rules" ;;
     esac
+  elif command_exists nft; then
+    output=$(run_timed nft list ruleset 2>/dev/null) || { add_finding UNKNOWN firewall "nftables is installed but rules are unavailable"; return; }
+    if grep -Eq 'hook input.*policy (drop|reject)' <<<"$output"; then
+      add_finding PASS firewall "nftables input base chain has a restrictive default policy"
+    else
+      add_finding WARN firewall "nftables rules exist but no drop/reject input default policy was confirmed"
+    fi
+  elif command_exists firewall-cmd; then
+    if run_timed firewall-cmd --state >/dev/null 2>&1; then
+      add_finding INFO firewall "firewalld is running; review active zones and provider firewall rules"
+    else
+      add_finding WARN firewall "firewalld is installed but not running"
+    fi
+  elif command_exists iptables; then
+    output=$(run_timed iptables -S INPUT 2>/dev/null) || { add_finding UNKNOWN firewall "iptables is installed but INPUT policy is unavailable"; return; }
+    if grep -q '^-P INPUT DROP' <<<"$output"; then add_finding PASS firewall "iptables INPUT default policy is DROP"
+    else add_finding WARN firewall "iptables INPUT default policy is not confirmed as DROP"; fi
   else
-    add_finding INFO firewall "UFW is not installed; another host or provider firewall may apply"
+    add_finding INFO firewall "no supported host firewall frontend was found; a provider firewall may apply"
+  fi
+}
+
+update_checks() {
+  local lists_dir newest now age_hours output pending security automatic timer version codename upgrade_log last_run_age=unknown
+  lists_dir=$(root_path /var/lib/apt/lists)
+  if [[ -n ${SYSADMIN_TOOLKIT_ROOT:-} ]]; then
+    add_finding UNKNOWN updates "APT update state is unavailable in the fixture/offline root"
+  elif ! command_exists apt-get; then
+    add_finding UNKNOWN updates "apt-get is unavailable"
+  else
+    newest=$(find "$lists_dir" -maxdepth 1 -type f -printf '%T@\n' 2>/dev/null | sort -nr | head -n1)
+    if [[ -n $newest ]]; then
+      now=$(date +%s)
+      age_hours=$(awk -v now="$now" -v then="$newest" 'BEGIN {printf "%d", (now-then)/3600}')
+    else
+      age_hours=-1
+    fi
+    output=$(run_timed apt-get -s -o Debug::NoLocking=1 upgrade 2>/dev/null) || {
+      add_finding UNKNOWN updates "APT simulation failed; package metadata age-hours=$age_hours"
+      output=
+    }
+    if [[ -n $output ]]; then
+      pending=$(grep -c '^Inst ' <<<"$output" || true)
+      security=$(grep '^Inst ' <<<"$output" | grep -Eic '(security|Debian-Security)' || true)
+      if ((age_hours < 0 || age_hours > MAX_APT_METADATA_AGE_HOURS)); then
+        add_finding WARN updates "pending-updates=$pending apparent-security-updates=$security metadata-age-hours=$age_hours" \
+          '{"pending":'"$pending"',"security":'"$security"',"metadata_age_hours":'"$age_hours"'}' \
+          "Refresh APT metadata before relying on update counts."
+      elif ((security > 0)); then
+        add_finding WARN updates "pending-updates=$pending apparent-security-updates=$security metadata-age-hours=$age_hours" \
+          '{"pending":'"$pending"',"security":'"$security"',"metadata_age_hours":'"$age_hours"'}' \
+          "Review and apply supported security updates."
+      else
+        add_finding PASS updates "pending-updates=$pending apparent-security-updates=0 metadata-age-hours=$age_hours"
+      fi
+    fi
+  fi
+
+  automatic=unknown
+  if command_exists apt-config && [[ -z ${SYSADMIN_TOOLKIT_ROOT:-} ]]; then
+    output=$(apt-config dump 2>/dev/null) || output=
+    if grep -Eq 'APT::Periodic::(Enable|Unattended-Upgrade)[[:space:]]+"?1"?' <<<"$output"; then automatic=enabled
+    else automatic=not-confirmed; fi
+  fi
+  timer=unknown
+  if command_exists systemctl && [[ -z ${SYSADMIN_TOOLKIT_ROOT:-} ]]; then
+    timer=$(systemctl is-enabled apt-daily-upgrade.timer 2>/dev/null) || timer=disabled
+  fi
+  upgrade_log=$(root_path /var/log/unattended-upgrades/unattended-upgrades.log)
+  if [[ -f $upgrade_log ]]; then
+    now=$(date +%s)
+    newest=$(stat -c '%Y' "$upgrade_log" 2>/dev/null) || newest=
+    [[ $newest =~ ^[0-9]+$ ]] && last_run_age=$(( (now - newest) / 3600 ))
+  fi
+  add_finding "$([[ $automatic == enabled && $timer == enabled ]] && printf PASS || printf INFO)" automatic-updates \
+    "configuration=$automatic apt-daily-upgrade.timer=$timer last-log-age-hours=$last_run_age"
+
+  if [[ -e $(root_path /var/run/reboot-required) ]]; then
+    add_finding WARN reboot-required "a reboot is required to complete installed updates" '{}' "Schedule a controlled reboot."
+  else
+    add_finding PASS reboot-required "no reboot-required marker is present"
+  fi
+
+  version=$(awk -F= '$1 == "VERSION_ID" {gsub(/"/, "", $2); print $2}' "$(root_path /etc/os-release)")
+  codename=$(awk -F= '$1 == "VERSION_CODENAME" {gsub(/"/, "", $2); print $2}' "$(root_path /etc/os-release)")
+  if command_exists ubuntu-distro-info && [[ $PLATFORM_ID == ubuntu && -z ${SYSADMIN_TOOLKIT_ROOT:-} ]]; then
+    output=$(ubuntu-distro-info --supported 2>/dev/null) || output=
+    if grep -Fxq "$codename" <<<"$output"; then
+      add_finding PASS lifecycle "platform=$PLATFORM_ID version=${version:-unknown} codename=${codename:-unknown} is listed as supported locally"
+    else
+      add_finding WARN lifecycle "platform=$PLATFORM_ID version=${version:-unknown} codename=${codename:-unknown} is not listed as supported locally"
+    fi
+  elif command_exists debian-distro-info && [[ $PLATFORM_ID == debian && -z ${SYSADMIN_TOOLKIT_ROOT:-} ]]; then
+    output=$(debian-distro-info --supported 2>/dev/null) || output=
+    if grep -Fxq "$codename" <<<"$output"; then
+      add_finding PASS lifecycle "platform=$PLATFORM_ID version=${version:-unknown} codename=${codename:-unknown} is listed as supported locally"
+    else
+      add_finding WARN lifecycle "platform=$PLATFORM_ID version=${version:-unknown} codename=${codename:-unknown} is not listed as supported locally"
+    fi
+  elif command_exists ubuntu-security-status && [[ -z ${SYSADMIN_TOOLKIT_ROOT:-} ]]; then
+    output=$(run_timed ubuntu-security-status 2>&1) || output=
+    if grep -Eqi '(no longer receives|could receive).*security' <<<"$output"; then
+      add_finding WARN lifecycle "platform=$PLATFORM_ID version=${version:-unknown} codename=${codename:-unknown}; support tool reports limited or ended coverage"
+    else
+      add_finding INFO lifecycle "platform=$PLATFORM_ID version=${version:-unknown} codename=${codename:-unknown}; local security-support tool queried"
+    fi
+  else
+    add_finding INFO lifecycle "platform=$PLATFORM_ID version=${version:-unknown} codename=${codename:-unknown}; lifecycle must be checked against vendor support data"
+  fi
+}
+
+apparmor_kernel_checks() {
+  local output enforcing complain unconfined denials=unknown issues=0 missing=0 key expected path actual
+  if command_exists journalctl; then
+    if output=$(run_timed journalctl -k --since "$AUTH_FAILURE_SINCE" --no-pager 2>/dev/null); then
+      denials=$(grep -Eic 'apparmor=.*DENIED' <<<"$output" || true)
+    fi
+  fi
+  if command_exists aa-status; then
+    output=$(run_timed aa-status 2>/dev/null) || { add_finding UNKNOWN apparmor "aa-status could not query AppArmor"; output=; }
+    if [[ -n $output ]]; then
+      enforcing=$(awk '/profiles are in enforce mode/ {print $1; exit}' <<<"$output"); enforcing=${enforcing:-0}
+      complain=$(awk '/profiles are in complain mode/ {print $1; exit}' <<<"$output"); complain=${complain:-0}
+      unconfined=$(awk '/processes are unconfined/ {print $1; exit}' <<<"$output"); unconfined=${unconfined:-0}
+      add_finding "$([[ $complain -eq 0 ]] && printf PASS || printf WARN)" apparmor \
+        "enforcing-profiles=$enforcing complain-profiles=$complain unconfined-processes=$unconfined recent-denials=$denials" \
+        '{"enforcing":'"$enforcing"',"complain":'"$complain"',"unconfined":'"$unconfined"'}'
+    fi
+  elif [[ -r $(root_path /sys/module/apparmor/parameters/enabled) ]]; then
+    output=$(<"$(root_path /sys/module/apparmor/parameters/enabled)")
+    add_finding "$([[ $output == Y ]] && printf INFO || printf WARN)" apparmor "kernel-enabled=$output; profile counts unavailable"
+  else
+    add_finding INFO apparmor "AppArmor status is unavailable"
+  fi
+
+  while read -r key expected; do
+    path=$(root_path "/proc/sys/${key//.//}")
+    if [[ ! -r $path ]]; then ((missing += 1)); continue; fi
+    actual=$(<"$path")
+    if [[ $expected == nonzero ]]; then
+      [[ $actual =~ ^[0-9]+$ && $actual -gt 0 ]] || ((issues += 1))
+    else
+      [[ $actual == "$expected" ]] || ((issues += 1))
+    fi
+  done <<'EOF'
+kernel.randomize_va_space 2
+fs.protected_hardlinks 1
+fs.protected_symlinks 1
+kernel.dmesg_restrict 1
+kernel.kptr_restrict 1
+kernel.yama.ptrace_scope 1
+kernel.unprivileged_bpf_disabled nonzero
+net.ipv4.tcp_syncookies 1
+net.ipv4.conf.all.accept_redirects 0
+net.ipv4.conf.default.accept_redirects 0
+net.ipv4.conf.all.accept_source_route 0
+net.ipv4.conf.default.accept_source_route 0
+EOF
+  if ((issues > 0)); then
+    add_finding WARN kernel-hardening "selected-controls-mismatched=$issues unavailable=$missing profile=$PROFILE" \
+      '{"mismatched":'"$issues"',"unavailable":'"$missing"'}' \
+      "Review each mismatched sysctl in the context of this host's role."
+  else
+    add_finding PASS kernel-hardening "selected-controls-mismatched=0 unavailable=$missing profile=$PROFILE"
+  fi
+
+  if command_exists mokutil && [[ -z ${SYSADMIN_TOOLKIT_ROOT:-} ]]; then
+    output=$(mokutil --sb-state 2>/dev/null) || output=unknown
+    if grep -qi 'enabled' <<<"$output"; then add_finding PASS secure-boot "Secure Boot is enabled"
+    else add_finding INFO secure-boot "Secure Boot state: $output"; fi
+  else
+    add_finding INFO secure-boot "mokutil is unavailable; Secure Boot was not evaluated"
+  fi
+}
+
+filesystem_storage_checks() {
+  local path mode owner issues=0 checked=0 path_issues=0 output ww_dirs ww_files suid caps mount_rows='' mount_issues=0 target options crypt=0
+  for path in /etc/passwd /etc/group /etc/shadow /etc/gshadow /etc/sudoers /etc/ssh/sshd_config; do
+    path=$(root_path "$path")
+    [[ -e $path ]] || continue
+    ((checked += 1))
+    owner=$(stat -c '%u' "$path" 2>/dev/null) || { ((issues += 1)); continue; }
+    mode=$(stat -c '%a' "$path" 2>/dev/null) || { ((issues += 1)); continue; }
+    if [[ ${SYSADMIN_TOOLKIT_TESTING:-0} != 1 ]]; then [[ $owner == 0 ]] || ((issues += 1)); fi
+    case $path in
+      */shadow|*/gshadow|*/sudoers) (( (8#$mode & 8#007) == 0 )) || ((issues += 1)) ;;
+      *) (( (8#$mode & 8#022) == 0 )) || ((issues += 1)) ;;
+    esac
+  done
+  while IFS= read -r path; do
+    [[ -f $path ]] || continue
+    ((checked += 1))
+    owner=$(stat -c '%u' "$path" 2>/dev/null) || { ((issues += 1)); continue; }
+    mode=$(stat -c '%a' "$path" 2>/dev/null) || { ((issues += 1)); continue; }
+    if [[ ${SYSADMIN_TOOLKIT_TESTING:-0} != 1 ]]; then [[ $owner == 0 ]] || ((issues += 1)); fi
+    (( (8#$mode & 8#077) == 0 )) || ((issues += 1))
+  done < <(find "$(root_path /etc/ssh)" -maxdepth 1 -type f -name 'ssh_host_*_key' 2>/dev/null)
+  if [[ -z ${SYSADMIN_TOOLKIT_ROOT:-} ]]; then
+    while IFS= read -r path; do
+      [[ -d $path ]] || { ((path_issues += 1)); continue; }
+      owner=$(stat -c '%u' "$path" 2>/dev/null) || { ((path_issues += 1)); continue; }
+      mode=$(stat -c '%a' "$path" 2>/dev/null) || { ((path_issues += 1)); continue; }
+      ((owner == 0 && (8#$mode & 8#022) == 0)) || ((path_issues += 1))
+    done < <(tr ':' '\n' <<<"$PATH")
+    ((issues += path_issues))
+  fi
+  add_finding "$([[ $issues -eq 0 ]] && printf PASS || printf FAIL)" sensitive-files \
+    "checked=$checked ownership-or-mode-issues=$issues root-path-directory-issues=$path_issues" \
+    '{"checked":'"$checked"',"issues":'"$issues"',"path_issues":'"$path_issues"'}' \
+    "Restore package/vendor ownership and restrictive modes on sensitive configuration files."
+
+  if [[ -n ${SYSADMIN_TOOLKIT_ROOT:-} || $EUID -ne 0 ]]; then
+    add_finding UNKNOWN world-writable "root privileges on the live root are required for bounded writable-path discovery"
+    add_finding UNKNOWN privileged-files "root privileges on the live root are required for privileged-file inventory"
+  else
+    output=$(run_timed find / -xdev -type d -perm -0002 ! -perm -1000 -print 2>/dev/null) || output=
+    ww_dirs=$(awk 'NF {n++} END {print n+0}' <<<"$output")
+    output=$(run_timed find / -xdev -type f -perm -0002 -print 2>/dev/null) || output=
+    ww_files=$(awk 'NF {n++} END {print n+0}' <<<"$output")
+    add_finding "$([[ $ww_dirs -eq 0 && $ww_files -eq 0 ]] && printf PASS || printf WARN)" world-writable \
+      "world-writable-files=$ww_files non-sticky-world-writable-directories=$ww_dirs"
+    output=$(run_timed find / -xdev -type f '(' -perm -4000 -o -perm -2000 ')' -print 2>/dev/null) || output=
+    suid=$(awk 'NF {n++} END {print n+0}' <<<"$output")
+    caps=unknown
+    if command_exists getcap; then
+      output=$(run_timed getcap -r / 2>/dev/null) || output=
+      caps=$(awk 'NF {n++} END {print n+0}' <<<"$output")
+    fi
+    add_finding INFO privileged-files "setuid-or-setgid-files=$suid capability-bearing-files=$caps; compare this inventory with a trusted baseline"
+  fi
+
+  if command_exists findmnt && [[ -z ${SYSADMIN_TOOLKIT_ROOT:-} ]]; then
+    output=$(findmnt -rn -o TARGET,OPTIONS 2>/dev/null) || output=
+    while read -r target options; do
+      case $target in
+        /tmp|/var/tmp|/dev/shm)
+          mount_rows+=${mount_rows:+;}"$target options=$options"
+          [[ ,$options, == *,nodev,* && ,$options, == *,nosuid,* ]] || ((mount_issues += 1))
+          ;;
+      esac
+    done <<<"$output"
+    add_finding "$([[ $mount_issues -eq 0 ]] && printf INFO || printf WARN)" mounts \
+      "temporary-mount-issues=$mount_issues ${mount_rows:-no separate temporary mounts found}"
+  else
+    add_finding INFO mounts "mount-option evaluation is unavailable"
+  fi
+
+  if command_exists lsblk && [[ -z ${SYSADMIN_TOOLKIT_ROOT:-} ]]; then
+    output=$(lsblk -rno TYPE,FSTYPE 2>/dev/null) || output=
+    crypt=$(grep -Ec '(^crypt[[:space:]]|[[:space:]]crypto_LUKS$)' <<<"$output" || true)
+    add_finding INFO encryption "encrypted-block-layer-indicators=$crypt; absence does not prove data is unencrypted"
+  else
+    add_finding INFO encryption "block-device encryption was not evaluated"
+  fi
+}
+
+persistence_logging_checks() {
+  local output enabled timers cron_issues=0 path mode owner sync storage audit log_use offset=unavailable remote=not-detected
+  if command_exists systemctl; then
+    output=$(systemctl list-unit-files --state=enabled --no-legend --plain 2>/dev/null) || output=
+    enabled=$(awk 'NF {n++} END {print n+0}' <<<"$output")
+    output=$(systemctl list-timers --all --no-legend --plain 2>/dev/null) || output=
+    timers=$(awk 'NF {n++} END {print n+0}' <<<"$output")
+  else enabled=unknown; timers=unknown
+  fi
+  for path in /etc/crontab /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly /etc/cron.monthly /var/spool/cron/crontabs; do
+    path=$(root_path "$path")
+    [[ -e $path ]] || continue
+    owner=$(stat -c '%u' "$path" 2>/dev/null) || { ((cron_issues += 1)); continue; }
+    mode=$(stat -c '%a' "$path" 2>/dev/null) || { ((cron_issues += 1)); continue; }
+    [[ $owner == 0 && $((8#$mode & 8#002)) -eq 0 ]] || ((cron_issues += 1))
+  done
+  add_finding "$([[ $cron_issues -eq 0 ]] && printf INFO || printf WARN)" persistence \
+    "enabled-unit-files=$enabled systemd-timers=$timers cron-permission-issues=$cron_issues; compare inventories with a trusted baseline"
+
+  sync=unknown
+  if command_exists timedatectl && [[ -z ${SYSADMIN_TOOLKIT_ROOT:-} ]]; then
+    output=$(timedatectl show -p NTPSynchronized --value 2>/dev/null) || output=unknown
+    [[ $output == yes ]] && sync=yes || sync=no
+  fi
+  if command_exists chronyc && [[ -z ${SYSADMIN_TOOLKIT_ROOT:-} ]]; then
+    offset=$(chronyc tracking 2>/dev/null | awk -F: '/^(Last offset|System time)/ {gsub(/^[[:space:]]+/, "", $2); print $2; exit}') || offset=unavailable
+  fi
+  add_finding "$([[ $sync == yes ]] && printf PASS || printf INFO)" time-sync "ntp-synchronized=$sync reported-offset=$offset"
+
+  storage=$(awk -F= '$1 ~ /^[[:space:]]*Storage/ {gsub(/[[:space:]]|"/, "", $2); print $2; exit}' \
+    "$(root_path /etc/systemd/journald.conf)" 2>/dev/null) || storage=
+  storage=${storage:-auto}
+  if grep -REq '(^|[[:space:]])(@@|action\(type="omfwd")' \
+      "$(root_path /etc/rsyslog.conf)" "$(root_path /etc/rsyslog.d)" 2>/dev/null; then
+    remote=present
+  elif command_exists systemctl; then
+    output=$(systemctl is-enabled systemd-journal-upload.service 2>/dev/null) || output=
+    [[ $output == enabled ]] && remote=present
+  fi
+  add_finding INFO journald "configured-storage=$storage remote-forwarding=$remote; auto is persistent when /var/log/journal exists"
+
+  audit=unavailable
+  if command_exists systemctl; then
+    audit=$(systemctl is-active auditd 2>/dev/null) || audit=inactive
+    audit=${audit:-unknown}
+  fi
+  add_finding "$([[ $audit == active ]] && printf PASS || printf INFO)" auditd "auditd-state=$audit"
+
+  if command_exists logrotate && [[ -z ${SYSADMIN_TOOLKIT_ROOT:-} ]]; then
+    if run_timed logrotate --debug /etc/logrotate.conf >/dev/null 2>&1; then
+      add_finding PASS logrotate "logrotate configuration passed a debug parse"
+    else
+      add_finding WARN logrotate "logrotate configuration debug parse failed" '{}' "Review logrotate --debug output."
+    fi
+  else
+    add_finding INFO logrotate "logrotate configuration was not evaluated"
+  fi
+
+  if command_exists df; then
+    log_use=$(df -P "$(root_path /var/log)" 2>/dev/null | awk 'NR == 2 {gsub(/%/, "", $5); print $5}') || log_use=
+    if [[ $log_use =~ ^[0-9]+$ ]]; then
+      add_finding "$([[ $log_use -lt 90 ]] && printf PASS || printf WARN)" log-space "/var/log filesystem-use=$log_use%"
+    else
+      add_finding UNKNOWN log-space "unable to determine /var/log filesystem usage"
+    fi
   fi
 }
 
 service_checks() {
-  local output count
+  local output count oom filesystem_errors apparmor_denials
   if command_exists fail2ban-client; then
     if output=$(fail2ban-client status sshd 2>/dev/null); then
       count=$(awk -F: '/Currently banned/ {gsub(/[[:space:]]/, "", $2); print $2}' <<<"$output")
@@ -228,12 +828,23 @@ service_checks() {
   else add_finding INFO fail2ban "fail2ban-client is not installed"; fi
 
   if command_exists journalctl; then
-    output=$(journalctl --since "$AUTH_FAILURE_SINCE" -u ssh -u sshd --no-pager 2>/dev/null) || output=
-    count=$(grep -Eic 'failed password|authentication failure|invalid user' <<<"$output" || true)
-    add_finding INFO ssh-auth-failures "aggregate failures since configured period=$count; identities and addresses not emitted"
-    output=$(journalctl -p 0..3 --since "$AUTH_FAILURE_SINCE" --no-pager 2>/dev/null) || output=
-    count=$(awk 'NF {n++} END {print n+0}' <<<"$output")
-    add_finding "$([[ $count -eq 0 ]] && printf PASS || printf WARN)" system-errors "high-severity journal entries in configured period=$count; raw logs not emitted"
+    if output=$(run_timed journalctl --since "$AUTH_FAILURE_SINCE" -u ssh -u sshd --no-pager 2>/dev/null); then
+      count=$(grep -Eic 'failed password|authentication failure|invalid user' <<<"$output" || true)
+      add_finding INFO ssh-auth-failures "aggregate failures since configured period=$count; identities and addresses not emitted"
+    else
+      add_finding UNKNOWN ssh-auth-failures "authentication journal query failed or timed out"
+    fi
+    if output=$(run_timed journalctl -p 0..3 --since "$AUTH_FAILURE_SINCE" --no-pager 2>/dev/null); then
+      count=$(awk 'NF {n++} END {print n+0}' <<<"$output")
+      oom=$(grep -Eic 'out of memory|oom-kill' <<<"$output" || true)
+      filesystem_errors=$(grep -Eic '(EXT[234]-fs error|XFS.*(corrupt|error)|BTRFS.*(corrupt|error))' <<<"$output" || true)
+      apparmor_denials=$(grep -Eic 'apparmor=.*DENIED' <<<"$output" || true)
+      add_finding "$([[ $count -eq 0 ]] && printf PASS || printf WARN)" system-errors \
+        "high-severity-entries=$count oom-events=$oom filesystem-errors=$filesystem_errors apparmor-denials=$apparmor_denials; raw logs not emitted" \
+        '{"high_severity":'"$count"',"oom":'"$oom"',"filesystem_errors":'"$filesystem_errors"',"apparmor_denials":'"$apparmor_denials"'}'
+    else
+      add_finding UNKNOWN system-errors "high-severity journal query failed or timed out"
+    fi
   else
     add_finding UNKNOWN ssh-auth-failures "journalctl is unavailable"
     add_finding UNKNOWN system-errors "journalctl is unavailable"
@@ -245,6 +856,32 @@ service_checks() {
   else add_finding UNKNOWN systemd "systemctl is unavailable"; fi
 }
 
+baseline_comparison() {
+  local check level summary changed=0 resolved=0 i
+  declare -A previous=() current=()
+  [[ -n $BASELINE_FILE ]] || return 0
+  command_exists jq || { add_finding UNKNOWN baseline-diff "jq is required to compare a baseline"; return; }
+  jq -e '.findings | type == "array"' "$BASELINE_FILE" >/dev/null 2>&1 ||
+    { add_finding UNKNOWN baseline-diff "baseline is not a valid audit JSON report"; return; }
+  while IFS= read -r check; do
+    [[ -n $check ]] && previous["$check"]=1
+  done < <(jq -r '.findings[] | (.check // .id // "") |
+    select(. != "host" and . != "baseline-diff")' "$BASELINE_FILE")
+  for ((i = 0; i < ${#FINDING_LEVELS[@]}; i++)); do
+    check=${FINDING_CHECKS[$i]}; level=${FINDING_LEVELS[$i]}; summary=${FINDING_MESSAGES[$i]}
+    [[ $check == host || $check == baseline-diff ]] && continue
+    current["$check"]=1
+    jq -e --arg check "$check" --arg level "$level" --arg summary "$summary" \
+      '.findings[] | select((.check // .id) == $check and .level == $level and
+      (.summary // .message // "") == $summary)' "$BASELINE_FILE" >/dev/null ||
+      ((changed += 1))
+  done
+  for check in "${!previous[@]}"; do [[ -n ${current[$check]+x} ]] || ((resolved += 1)); done
+  add_finding "$([[ $changed -eq 0 ]] && printf PASS || printf WARN)" baseline-diff \
+    "new-or-changed-checks=$changed checks-absent-from-current-run=$resolved" \
+    '{"new_or_changed":'"$changed"',"absent_from_current":'"$resolved"'}'
+}
+
 main() {
   parse_args "$@"
   [[ -z $CONFIG_FILE ]] || load_config "$CONFIG_FILE"
@@ -252,8 +889,18 @@ main() {
   case $? in 1) die "unsupported platform: ${PLATFORM_ID:-unknown} (Debian/Ubuntu required)";; 2) die "cannot read /etc/os-release";; esac
   require_command awk; require_command grep; require_command mktemp; require_command getent
   make_temp_dir
-  audit_identity; interactive_accounts; password_states; privileged_groups; last_logins
-  sshd_config; network_checks; service_checks
+  audit_identity
+  if check_enabled accounts; then
+    interactive_accounts; password_states; privileged_groups; last_logins
+    account_integrity_checks; account_aging_checks; sudo_checks; authorized_key_checks
+  fi
+  check_enabled updates && update_checks
+  check_enabled ssh && sshd_config
+  check_enabled network && network_checks
+  check_enabled confinement && apparmor_kernel_checks
+  check_enabled filesystem && filesystem_storage_checks
+  if check_enabled services; then persistence_logging_checks; service_checks; fi
+  baseline_comparison
   if [[ $FORMAT == json ]]; then render_json; else render_text; fi
   findings_exit_code
 }
