@@ -5,7 +5,11 @@ case $1 in
   info) [[ ${MOCK_DOCKER_DOWN:-0} == 0 ]] || exit 1; printf '"/nonexistent/docker"\n' ;;
   ps) if [[ ${MOCK_DOCKER_EMPTY:-0} == 0 ]]; then printf 'abc\n'; fi ;;
   inspect) [[ ${MOCK_DOCKER_DISAPPEAR:-0} == 0 ]] || exit 1; cat "$MOCK_DOCKER_INSPECT" ;;
-  stats) [[ ${MOCK_DOCKER_STATS_FAIL:-0} == 0 ]] || exit 1; printf '{"Name":"web","CPUPerc":"1.0%%","MemUsage":"20MiB / 1GiB","MemPerc":"2%%","NetIO":"1kB / 2kB","BlockIO":"0B / 0B","PIDs":"2"}\n' ;;
+  stats) [[ ${MOCK_DOCKER_STATS_FAIL:-0} == 0 ]] || exit 1
+    printf '{"Name":"web","CPUPerc":"1.0%%","MemUsage":"20MiB / 1GiB","MemPerc":"2%%","NetIO":"1kB / 2kB","BlockIO":"0B / 0B","PIDs":"2"}\n'
+    if [[ ${MOCK_DOCKER_EXTRA_STATS:-0} == 1 ]]; then
+      printf '{"Name":"nginx-proxy-manager","CPUPerc":"0.11%%","MemUsage":"276.2MiB / 30.6GiB","MemPerc":"0.88%%","PIDs":"62"}\n'
+    fi ;;
   system) printf '{"Type":"Images","TotalCount":"2","Active":"1","Size":"20MB","Reclaimable":"10MB"}\n' ;;
   context) printf 'default\n' ;;
   *) exit 99 ;;

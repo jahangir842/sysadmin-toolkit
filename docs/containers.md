@@ -27,6 +27,8 @@ history. A lifetime restart count alone is informational.
 Text output includes an inventory sorted by Compose project and container, then
 findings under a heading for each container using the shared report hierarchy.
 Container names appear once in these headings rather than on every finding row.
+Resource snapshots and Docker disk usage appear as aligned tables with column
+headings in the operations section.
 JSON includes `tool`, version,
 findings, and a `containers` inventory suitable for the next baseline. Containers
 without Compose labels are grouped under `standalone`.

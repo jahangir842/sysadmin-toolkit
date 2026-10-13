@@ -132,6 +132,25 @@ render_account_table() {
   done <<<"$rows"
 }
 
+render_container_metrics_table() {
+  local check=$1 details=$2
+  jq -r --arg check "$check" '
+    def cell: if . == null or . == "" then "unknown" else tostring end;
+    (if $check == "container-resources" then
+      [["CONTAINER", "CPU", "MEMORY / LIMIT", "MEMORY %", "PIDS"]] +
+      [sort_by(.container)[] | [.container, .cpu, .memory, .memory_percent, .pids] | map(cell)]
+    else
+      [["TYPE", "TOTAL", "ACTIVE", "SIZE", "RECLAIMABLE"]] +
+      [.[] | [.type, .total, .active, .size, .reclaimable] | map(cell)]
+    end) | . as $rows |
+    [range(0; 5) as $column | [$rows[] | .[$column] | length] | max] as $widths |
+    $rows[] | . as $row |
+    "  " + ([range(0; 5) as $column |
+      $row[$column] + (if $column < 4 then
+        " " * ($widths[$column] - ($row[$column] | length)) else "" end)] |
+      join("  "))' <<<"$details"
+}
+
 render_text() {
   local i level color reset blue yellow green red bold section previous_section='' check message remediation
   local host_message='' hostname=unknown timestamp=unknown os=unknown kernel=unknown uptime=unknown
@@ -215,6 +234,19 @@ render_text() {
     fi
 
     color=$(level_color "$level")
+    if [[ ${TOOLKIT_TOOL:-} == container-health-check &&
+      ( $check == container-resources || $check == container-storage ) ]] &&
+      jq -e 'type == "array"' <<<"${FINDING_DETAILS[$i]}" >/dev/null; then
+      if [[ $check == container-resources ]]; then
+        message='Current resource snapshot (not historical utilization)'
+      else
+        message='Docker disk usage (reclaimable does not mean safe to delete)'
+      fi
+      printf '%-34s %s%-7s%s %s\n' "$(report_label "$check"):" "$color" "$level" "$reset" "$message"
+      render_container_metrics_table "$check" "${FINDING_DETAILS[$i]}"
+      printf '\n'
+      continue
+    fi
     printf '%-34s %s%-7s%s %s\n' "$(report_label "$check"):" "$color" "$level" "$reset" "$message"
     [[ -z $remediation ]] || printf '%-34s %s\n' '  Remediation:' "$remediation"
   done

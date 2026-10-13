@@ -123,3 +123,16 @@ change_fixture() {
   [ "$status" -eq 0 ]
   [[ $output != *"no CPU limit"* && $output == *"configured root/default user"* ]]
 }
+@test "resource and storage snapshots use aligned tables" {
+  export MOCK_DOCKER_EXTRA_STATS=1
+  check_containers
+  [ "$status" -eq 0 ]
+  [[ $output == *"MEMORY / LIMIT"* && $output == *"MEMORY %"* && $output == *"RECLAIMABLE"* ]]
+  [[ $output != *"web: CPU="* && $output != *"Images: size="* ]]
+  stats_table=$(printf '%s\n' "$output" | awk '/^  CONTAINER/ {n=3} n>0 {print; n--}')
+  header_cpu=$(printf '%s\n' "$stats_table" | awk 'NR==1 {print index($0, "CPU")}')
+  long_cpu=$(printf '%s\n' "$stats_table" | awk '/nginx-proxy-manager/ {print index($0, "0.11%")}')
+  short_cpu=$(printf '%s\n' "$stats_table" | awk '/  web / {print index($0, "1.0%")}')
+  [ "$header_cpu" -eq "$long_cpu" ]
+  [ "$header_cpu" -eq "$short_cpu" ]
+}
