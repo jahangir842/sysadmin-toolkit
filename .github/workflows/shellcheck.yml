@@ -15,6 +15,6 @@ jobs:
       - name: Install validation tools
         run: sudo apt-get update && sudo apt-get install -y shellcheck bats jq
       - name: ShellCheck
-        run: shellcheck bin/* lib/*.sh tests/*.bash tests/*.bats tests/fixtures/bin/* tests/fixtures/docker/docker
+        run: shellcheck bin/* lib/*.sh tests/*.bash tests/*.bats tests/fixtures/bin/* tests/fixtures/docker/docker tests/fixtures/disk/*
       - name: Bats
         run: bats tests

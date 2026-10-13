@@ -47,6 +47,7 @@ report_section() {
     apparmor|kernel-hardening|secure-boot) printf 'MANDATORY ACCESS & KERNEL' ;;
     sensitive-files|world-writable|privileged-files|mounts|encryption) printf 'FILESYSTEM & STORAGE' ;;
     persistence|fail2ban|ssh-auth-failures|system-errors|systemd|time-sync|journald|auditd|logrotate|log-space) printf 'SERVICES, LOGGING & SECURITY EVENTS' ;;
+    disk-*) printf 'FILESYSTEM & STORAGE' ;;
     container-*) printf 'CONTAINER OPERATIONS' ;;
     baseline-diff) printf 'BASELINE COMPARISON' ;;
     *) printf 'OTHER CHECKS' ;;
@@ -96,6 +97,10 @@ report_label() {
     auditd) printf 'Audit service' ;;
     logrotate) printf 'Log rotation' ;;
     log-space) printf 'Log filesystem capacity' ;;
+    disk-space) printf 'Disk space (bytes)' ;;
+    disk-inodes) printf 'Inode capacity (counts)' ;;
+    disk-mount) printf 'Mount state' ;;
+    disk-discovery) printf 'Directory sizes' ;;
     baseline-diff) printf 'Baseline difference' ;;
     *) printf '%s' "$1" ;;
   esac

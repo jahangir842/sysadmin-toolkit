@@ -13,6 +13,8 @@ setup_audit_fixture() {
   cp "$REPO_ROOT/tests/fixtures/etc/os-release" "$FIXTURE_ROOT/etc/os-release"
   cp "$REPO_ROOT/tests/fixtures/etc/passwd" "$FIXTURE_ROOT/etc/passwd"
   cp "$REPO_ROOT/tests/fixtures/etc/shells" "$FIXTURE_ROOT/etc/shells"
+  # Fixture security expectations must not depend on the checkout or runner umask.
+  chmod 644 "$FIXTURE_ROOT/etc/os-release" "$FIXTURE_ROOT/etc/passwd" "$FIXTURE_ROOT/etc/shells"
   cp "$REPO_ROOT/tests/fixtures/bin/"* "$MOCK_BIN/"
   chmod +x "$MOCK_BIN/"*
   export PATH="$MOCK_BIN:/usr/bin:/bin"

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+[[ ${MOCK_MOUNTS_FAIL:-0} != 1 ]] || exit 1
+cat <<'JSON'
+{"filesystems":[{"target":"/","source":"/dev/vda1","fstype":"ext4","options":"rw,relatime"},{"target":"/data folder","source":"/dev/vdb1","fstype":"ext4","options":"ro"},{"target":"/run","source":"tmpfs","fstype":"tmpfs","options":"rw"}]}
+JSON

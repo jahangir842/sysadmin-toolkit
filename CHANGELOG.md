@@ -6,6 +6,13 @@ All notable changes follow Keep a Changelog and versions follow Semantic Version
 
 ### Added
 
+- Read-only disk capacity reports with configurable space/inode thresholds,
+  exact mount exclusions, writable-mount expectations, and optional bounded
+  directory discovery.
+
+- Prioritized feature roadmap with completion checklists for routine VPS and
+  Linux server checks, recovery, reporting, maintenance, and future portability.
+
 - Read-only Docker container reports with Compose grouping, expected-container
   policy, health/OOM checks, restart baselines, resource and storage snapshots,
   security observations, and cron documentation.
@@ -18,6 +25,9 @@ All notable changes follow Keep a Changelog and versions follow Semantic Version
   comparison, and structured JSON schema version 2.
 
 ### Fixed
+
+- Set explicit account-fixture permissions so host audit tests are independent
+  of the checkout permissions and runner umask.
 
 - Include primary-group members in privileged group reports, use the host's
   interactive-account definition consistently, and report failed journal
