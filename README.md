@@ -16,12 +16,12 @@ colors in interactive terminals. Set `NO_COLOR=1` to disable colors. JSON output
 remains available for automation.
 
 ```sh
-sudo /usr/local/sbin/host-security-audit --format text
-sudo /usr/local/sbin/host-security-audit --format json >audit.json
-sudo /usr/local/sbin/host-security-audit --ssh-user service-account
-sudo /usr/local/sbin/host-security-audit --profile server --fail-on warn
-sudo /usr/local/sbin/host-security-audit --redact-identifiers
-sudo /usr/local/sbin/host-security-audit --baseline previous-audit.json
+sudo ./bin/host-security-audit --format text
+sudo ./bin/host-security-audit --format json >audit.json
+sudo ./bin/host-security-audit --ssh-user service-account
+sudo ./bin/host-security-audit --profile server --fail-on warn
+sudo ./bin/host-security-audit --redact-identifiers
+sudo ./bin/host-security-audit --baseline previous-audit.json
 ```
 
 Exit status is `0` when there are no `FAIL` findings, `1` when one or more
@@ -46,8 +46,8 @@ actionable.
 
 ## Running from a checkout
 
-Installing the toolkit system-wide is optional. From a verified checkout on a
-Debian or Ubuntu server, run the audit directly:
+From a verified Git checkout on a Debian or Ubuntu server, run the audit
+directly from the repository directory:
 
 ```sh
 sudo ./bin/host-security-audit --format text
@@ -60,22 +60,7 @@ before pulling them and running the command again. Keep each client's checkout,
 configuration, and audit output separate; do not commit client-specific data or
 results to this repository.
 
-If you prefer a system-wide command, install the verified checkout under
-`/usr/local/lib/sysadmin-toolkit` and add a link in `/usr/local/sbin`:
-
-```sh
-sudo install -d -o root -g root -m 0755 /usr/local/lib/sysadmin-toolkit/{bin,lib}
-sudo install -o root -g root -m 0755 bin/* /usr/local/lib/sysadmin-toolkit/bin/
-sudo install -o root -g root -m 0644 lib/*.sh /usr/local/lib/sysadmin-toolkit/lib/
-sudo ln -s /usr/local/lib/sysadmin-toolkit/bin/host-security-audit /usr/local/sbin/host-security-audit
-```
-
-To remove that system-wide installation, verify the paths and then run:
-
-```sh
-sudo unlink /usr/local/sbin/host-security-audit
-sudo rm -r /usr/local/lib/sysadmin-toolkit
-```
+For daily reports from a checkout, see [automating reports with cron](docs/deployment.md#automating-reports-with-cron).
 
 See [deployment](docs/deployment.md), the [security model](docs/security-model.md),
 and the [report visual hierarchy](docs/reporting-style.md). New commands should
