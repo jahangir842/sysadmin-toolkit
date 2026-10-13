@@ -1,8 +1,110 @@
 #!/usr/bin/env bash
 set -uo pipefail
-case ${1:-} in
-  --help) printf 'Usage: container-health-check [--help|--version]\nReserved for a future read-only implementation.\n'; exit 0 ;;
-  --version) printf 'container-health-check 0.1.0\n'; exit 0 ;;
-esac
-printf 'ERROR: container-health-check is not implemented in version 0.1.0\n' >&2
-exit 2
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd)
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/../lib/common.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/../lib/logging.sh"
+TOOLKIT_TOOL=container-health-check
+# shellcheck disable=SC2034 # Used by the shared renderer.
+REPORT_TITLE='CONTAINER HEALTH REPORT'
+FORMAT=text
+AUDIT_TIMEOUT=20
+EXPECTED=''
+BASELINE=''
+REPORT_FAIL_ON_LEVEL=fail
+usage() {
+  cat <<'HELP'
+Usage: container-health-check [OPTIONS]
+Read-only Docker report, grouped by Compose project and container.
+  --format text|json      Output format (default: text)
+  --expected NAME,...     Containers required to be running (exact names)
+  --baseline FILE         Previous JSON report for restart comparison
+  --timeout SECONDS       Timeout per Docker query (default: 20)
+  --fail-on fail|warn     Exit 1 for findings at this threshold
+  --help | --version
+Exit codes: 0 no policy failures, 1 findings, 2 usage/execution error.
+No environment variables, raw logs, or healthcheck output are reported.
+HELP
+}
+while (($#)); do
+  case $1 in
+    --help) usage; exit 0 ;;
+    --version) printf '%s %s\n' "$TOOLKIT_TOOL" "$TOOLKIT_VERSION"; exit 0 ;;
+    --format|--expected|--baseline|--timeout|--fail-on)
+      (($# >= 2)) || die "missing value for $1"
+      case $1 in
+        --format) FORMAT=$2 ;; --expected) EXPECTED=$2 ;; --baseline) BASELINE=$2 ;;
+        --timeout) AUDIT_TIMEOUT=$2 ;; --fail-on) REPORT_FAIL_ON_LEVEL=$2 ;;
+      esac
+      shift 2 ;;
+    *) die "unknown option: $1" ;;
+  esac
+done
+[[ $FORMAT == text || $FORMAT == json ]] || die 'format must be text or json'
+[[ $REPORT_FAIL_ON_LEVEL == fail || $REPORT_FAIL_ON_LEVEL == warn ]] || die 'fail-on must be fail or warn'
+[[ $AUDIT_TIMEOUT =~ ^[1-9][0-9]*$ ]] || die 'timeout must be a positive integer'
+require_command docker; require_command jq; require_command timeout
+make_temp_dir
+query() { timeout --kill-after=2 "$AUDIT_TIMEOUT" docker "$@"; }
+query info --format '{{json .DockerRootDir}}' >"$TOOLKIT_TMPDIR/root" 2>/dev/null || die 'Docker daemon unavailable or permission denied'
+query ps -aq --no-trunc >"$TOOLKIT_TMPDIR/ids" 2>/dev/null || die 'cannot list containers'
+printf '[]\n' >"$TOOLKIT_TMPDIR/containers"
+# Inspect individually: bounded queries and no command-line size limit on large hosts.
+while IFS= read -r id; do
+  [[ -n $id ]] || continue
+  if query inspect "$id" >"$TOOLKIT_TMPDIR/inspect" 2>/dev/null; then
+    jq -e 'type == "array" and length == 1 and (.[0].State | type == "object")' "$TOOLKIT_TMPDIR/inspect" >/dev/null || die 'invalid Docker inspect response'
+    # Persist only the fields needed for checks, never Config.Env or health logs.
+    jq '.[0] | {id: .Id, name: (.Name | ltrimstr("/")), project: (.Config.Labels["com.docker.compose.project"] // "standalone"), service: (.Config.Labels["com.docker.compose.service"] // ""), state: .State.Status, health: (.State.Health.Status // "unknown"), exit_code: .State.ExitCode, oom: .State.OOMKilled, restarts: .RestartCount, user: (.Config.User // ""), memory_limit: .HostConfig.Memory, cpu_limit: .HostConfig.NanoCpus, cpu_quota: .HostConfig.CpuQuota, cpu_set: .HostConfig.CpusetCpus, privileged: .HostConfig.Privileged, network_mode: .HostConfig.NetworkMode, pid_mode: .HostConfig.PidMode, ipc_mode: .HostConfig.IpcMode, capabilities: (.HostConfig.CapAdd // []), log_driver: .HostConfig.LogConfig.Type, log_options: {"max-size": .HostConfig.LogConfig.Config["max-size"], "max-file": .HostConfig.LogConfig.Config["max-file"]}, ports: (.NetworkSettings.Ports // {}), mounts: [.Mounts[]? | {type: .Type, source: .Source, destination: .Destination, writable: .RW}]}' "$TOOLKIT_TMPDIR/inspect" >>"$TOOLKIT_TMPDIR/rows" || die 'cannot parse container'
+  else
+    add_finding UNKNOWN container-discovery "container $id disappeared or could not be inspected"
+  fi
+done <"$TOOLKIT_TMPDIR/ids"
+if [[ -f $TOOLKIT_TMPDIR/rows ]]; then jq -s 'sort_by(.project, .name)' "$TOOLKIT_TMPDIR/rows" >"$TOOLKIT_TMPDIR/containers" || die 'cannot assemble inventory'; fi
+printf '[]\n' >"$TOOLKIT_TMPDIR/baseline"
+if [[ -n $BASELINE ]]; then
+  jq -e '.tool == "container-health-check" and (.containers | type == "array") and all(.containers[]; (.id | type == "string") and (.restarts | type == "number"))' "$BASELINE" >/dev/null 2>&1 || die 'invalid container baseline'
+  jq '.containers' "$BASELINE" >"$TOOLKIT_TMPDIR/baseline"
+fi
+jq -c --arg expected "$EXPECTED" --slurpfile previous "$TOOLKIT_TMPDIR/baseline" -f "$SCRIPT_DIR/../lib/container-checks.jq" "$TOOLKIT_TMPDIR/containers" >"$TOOLKIT_TMPDIR/findings" || die 'cannot evaluate containers'
+while IFS= read -r row; do
+  level=$(jq -r '.level' <<<"$row")
+  check=$(jq -r '.check' <<<"$row")
+  message=$(jq -r '.message' <<<"$row")
+  details=$(jq -c '.details' <<<"$row")
+  add_finding "$level" "$check" "$message" "$details"
+done <"$TOOLKIT_TMPDIR/findings"
+if query stats --no-stream --format '{{json .}}' >"$TOOLKIT_TMPDIR/stats" 2>/dev/null && jq -se 'all(.[]; type == "object")' "$TOOLKIT_TMPDIR/stats" >/dev/null; then
+  details=$(jq -sc '[.[] | {container: .Name, cpu: .CPUPerc, memory: .MemUsage, memory_percent: .MemPerc, network_io: .NetIO, block_io: .BlockIO, pids: .PIDs}]' "$TOOLKIT_TMPDIR/stats")
+  message=$(jq -r '.[] | "\(.container): CPU=\(.cpu) memory=\(.memory) (\(.memory_percent)) PIDs=\(.pids)"' <<<"$details")
+  add_finding INFO container-resources "current resource snapshot (not historical utilization): ${message:-no running containers}" "$details"
+  while IFS= read -r row; do
+    add_finding WARN container-resources "$(jq -r '.container' <<<"$row"): memory usage at least 80% of reported limit" "$row"
+  done < <(jq -c '.[] | select((.memory_percent | rtrimstr("%") | tonumber? // 0) >= 80)' <<<"$details")
+else add_finding UNKNOWN container-resources 'resource snapshot unavailable'; fi
+if query system df --format '{{json .}}' >"$TOOLKIT_TMPDIR/df" 2>/dev/null && jq -se 'all(.[]; type == "object")' "$TOOLKIT_TMPDIR/df" >/dev/null; then
+  details=$(jq -sc '[.[] | {type: .Type, total: .TotalCount, active: .Active, size: .Size, reclaimable: .Reclaimable}]' "$TOOLKIT_TMPDIR/df")
+  message=$(jq -r '.[] | "\(.type): size=\(.size) reclaimable=\(.reclaimable)"' <<<"$details")
+  add_finding INFO container-storage "Docker disk usage (reclaimable does not mean safe to delete): $message" "$details"
+else add_finding UNKNOWN container-storage 'Docker disk usage unavailable'; fi
+root_dir=$(jq -r '.' "$TOOLKIT_TMPDIR/root")
+# Only inspect local paths for the filesystem hosting Docker data.
+if [[ -z ${DOCKER_HOST:-} && -z ${DOCKER_CONTEXT:-} ]] && [[ $(query context show 2>/dev/null) == default ]] && [[ -d $root_dir ]]; then
+  usage_percent=$(df -P -- "$root_dir" 2>/dev/null | awk 'NR==2 {gsub(/%/, "", $5); print $5}')
+  if [[ $usage_percent =~ ^[0-9]+$ ]]; then
+    level=PASS
+    ((usage_percent >= 80)) && level=WARN
+    ((usage_percent >= 90)) && level=FAIL
+    add_finding "$level" container-storage "Docker data filesystem usage=$usage_percent%"
+  else add_finding UNKNOWN container-storage 'Docker data filesystem capacity unavailable'; fi
+else add_finding UNKNOWN container-storage 'local Docker data filesystem capacity unavailable for this context'; fi
+if [[ $FORMAT == json ]]; then
+  render_json >"$TOOLKIT_TMPDIR/report"
+  jq --slurpfile containers "$TOOLKIT_TMPDIR/containers" '. + {containers: $containers[0]}' "$TOOLKIT_TMPDIR/report"
+else
+  printf 'PROJECT\tCONTAINER\tSTATE\tHEALTH\tRESTARTS\n'
+  jq -r '.[] | [.project, .name, .state, .health, .restarts] | @tsv' "$TOOLKIT_TMPDIR/containers"
+  render_text
+fi
+findings_exit_code

@@ -6,6 +6,10 @@ All notable changes follow Keep a Changelog and versions follow Semantic Version
 
 ### Added
 
+- Read-only Docker container reports with Compose grouping, expected-container
+  policy, health/OOM checks, restart baselines, resource and storage snapshots,
+  security observations, and cron documentation.
+
 - Expanded host auditing for updates, lifecycle, accounts, sudo and SSH keys,
   firewalls and listeners, AppArmor and kernel controls, filesystem and storage
   posture, persistence, time, logging, audit services, and security events.

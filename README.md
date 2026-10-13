@@ -70,9 +70,40 @@ behavior. Contributions must pass `shellcheck` and `bats tests`.
 ## Commands
 
 - `host-security-audit` — implemented.
-- `container-health-check`, `backup-verification`, `tls-expiry-check`, and
+- `container-health-check` — implemented; see [Docker container reports](docs/containers.md).
+- `backup-verification`, `tls-expiry-check`, and
   `disk-capacity-check` — reserved command names; currently return exit 2 with a
   clear not-implemented message.
+
+## Quick Docker status check
+
+From the checkout directory, run:
+
+```sh
+sudo ./bin/container-health-check --format text
+sudo ./bin/container-health-check --format json >containers.json
+```
+
+To require specific containers to be running, replace `web,database` with their
+exact Docker container names:
+
+```sh
+sudo ./bin/container-health-check --expected web,database --format text
+```
+
+To detect new restarts since a saved JSON report:
+
+```sh
+sudo ./bin/container-health-check --baseline containers.json --format text
+```
+
+Requires Docker CLI, `jq`, and GNU `timeout`, plus Docker daemon access. The
+report groups containers by Compose project and checks health, OOM kills,
+resource limits, disk usage, published ports, security settings, and logging.
+It is read-only. Missing health checks are `UNKNOWN`; stopped containers are
+informational unless listed in `--expected`. Protect saved reports as sensitive
+data. See [Docker container reports](docs/containers.md) for details and a cron
+example that runs every ten minutes.
 
 Keep this repository private until output, fixtures, documentation, and Git
 history have been reviewed for client-identifying information.

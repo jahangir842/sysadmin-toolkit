@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -eu
+printf '%s\n' "$*" >>"$MOCK_DOCKER_CALLS"
+case $1 in
+  info) [[ ${MOCK_DOCKER_DOWN:-0} == 0 ]] || exit 1; printf '"/nonexistent/docker"\n' ;;
+  ps) if [[ ${MOCK_DOCKER_EMPTY:-0} == 0 ]]; then printf 'abc\n'; fi ;;
+  inspect) [[ ${MOCK_DOCKER_DISAPPEAR:-0} == 0 ]] || exit 1; cat "$MOCK_DOCKER_INSPECT" ;;
+  stats) [[ ${MOCK_DOCKER_STATS_FAIL:-0} == 0 ]] || exit 1; printf '{"Name":"web","CPUPerc":"1.0%%","MemUsage":"20MiB / 1GiB","MemPerc":"2%%","NetIO":"1kB / 2kB","BlockIO":"0B / 0B","PIDs":"2"}\n' ;;
+  system) printf '{"Type":"Images","TotalCount":"2","Active":"1","Size":"20MB","Reclaimable":"10MB"}\n' ;;
+  context) printf 'default\n' ;;
+  *) exit 99 ;;
+esac

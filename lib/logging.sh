@@ -47,6 +47,7 @@ report_section() {
     apparmor|kernel-hardening|secure-boot) printf 'MANDATORY ACCESS & KERNEL' ;;
     sensitive-files|world-writable|privileged-files|mounts|encryption) printf 'FILESYSTEM & STORAGE' ;;
     persistence|fail2ban|ssh-auth-failures|system-errors|systemd|time-sync|journald|auditd|logrotate|log-space) printf 'SERVICES, LOGGING & SECURITY EVENTS' ;;
+    container-*) printf 'CONTAINER OPERATIONS' ;;
     baseline-diff) printf 'BASELINE COMPARISON' ;;
     *) printf 'OTHER CHECKS' ;;
   esac
@@ -166,7 +167,7 @@ render_text() {
   uptime=${host_message#* uptime=}
 
   printf '\n%s==============================================%s\n' "$blue" "$reset"
-  printf '%s        SYSTEM SECURITY AUDIT REPORT          %s\n' "$blue" "$reset"
+  printf '%s        %-38s%s\n' "$blue" "${REPORT_TITLE:-SYSTEM SECURITY AUDIT REPORT}" "$reset"
   printf '%s==============================================%s\n' "$blue" "$reset"
   printf 'Date:     %s\n' "$timestamp"
   printf 'Hostname: %s\n' "$hostname"
@@ -215,7 +216,7 @@ render_text() {
 
 render_json() {
   local i comma='' details
-  printf '{"schema_version":2,"tool":"host-security-audit","version":"%s","findings":[' "$(json_escape "$TOOLKIT_VERSION")"
+  printf '{"schema_version":2,"tool":"%s","version":"%s","findings":[' "$(json_escape "${TOOLKIT_TOOL:-host-security-audit}")" "$(json_escape "$TOOLKIT_VERSION")"
   for ((i = 0; i < ${#FINDING_LEVELS[@]}; i++)); do
     details=${FINDING_DETAILS[$i]}
     case $details in \{*\}|\[*\]) ;; *) details='{}' ;; esac
