@@ -69,10 +69,14 @@ behavior. Contributions must pass `shellcheck` and `bats tests`.
 
 ## Commands
 
+See the [feature roadmap](ROADMAP.md) for the prioritized implementation plan
+and completion checklists for future VPS and Linux server management features.
+
 - `host-security-audit` — implemented.
 - `container-health-check` — implemented; see [Docker container reports](docs/containers.md).
-- `backup-verification`, `tls-expiry-check`, and
-  `disk-capacity-check` — reserved command names; currently return exit 2 with a
+- `disk-capacity-check` — implemented; see [disk capacity reports](docs/disk-capacity.md).
+- `backup-verification` and `tls-expiry-check` — reserved command names;
+  currently return exit 2 with a
   clear not-implemented message.
 
 ## Quick Docker status check

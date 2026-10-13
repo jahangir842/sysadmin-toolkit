@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+[[ ${MOCK_DF_FAIL:-0} != 1 ]] || exit 1
+[[ ${MOCK_DF_TIMEOUT:-0} != 1 ]] || exec sleep 5
+printf 'Total Used Available Percent\n'
+if [[ $* == *itotal* ]]; then
+  if [[ ${MOCK_INODE_UNKNOWN:-0} == 1 ]]; then printf '0 0 0 -\n'; else printf '100 10 90 %s%%\n' "${MOCK_INODE_PERCENT:-10}"; fi
+else printf '1000 100 900 %s%%\n' "${MOCK_SPACE_PERCENT:-10}"; fi
