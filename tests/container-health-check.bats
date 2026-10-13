@@ -26,6 +26,16 @@ change_fixture() {
   [ "$status" -eq 0 ]
   [[ $output == *"CONTAINER HEALTH REPORT"* && $output == *"site"* && $output == *"Summary:"* ]]
 }
+@test "container identity appears once as heading rather than on every finding" {
+  check_containers
+  [ "$status" -eq 0 ]
+  [[ $output == *"[+] [site/web]"* ]]
+  [ "$(printf '%s\n' "$output" | awk '/\[site\/web\]/ {n++} END {print n+0}')" -eq 1 ]
+  [[ $output == *"state=running health=healthy exit=0"* ]]
+  check_containers --format json
+  [ "$status" -eq 0 ]
+  jq -e '.findings[] | select(.check == "container-health") | .message | startswith("[site/web] ")' <<<"$output"
+}
 @test "inventory columns align with long project and container names" {
   change_fixture '.[0].Name = "/nginx-proxy-manager" | .[0].Config.Labels["com.docker.compose.project"] = "drupal-staging"'
   check_containers

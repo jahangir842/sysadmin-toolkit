@@ -137,6 +137,7 @@ render_text() {
   local host_message='' hostname=unknown timestamp=unknown os=unknown kernel=unknown uptime=unknown
   local pass_count=0 warn_count=0 fail_count=0 info_count=0 unknown_count=0
   local total=${#FINDING_LEVELS[@]}
+  local container_heading prefix
   REPORT_COLORS=no
   if [[ -t 1 && ${NO_COLOR:-} == "" ]]; then REPORT_COLORS=yes; fi
 
@@ -193,6 +194,15 @@ render_text() {
     remediation=${FINDING_REMEDIATIONS[$i]}
     [[ $check == host ]] && continue
     section=$(report_section "$check")
+    if [[ ${TOOLKIT_TOOL:-} == container-health-check ]]; then
+      container_heading=$(jq -r 'if type == "object" and .project != null and .container != null
+        then "[\(.project)/\(.container)]" else "" end' <<<"${FINDING_DETAILS[$i]}")
+      if [[ -n $container_heading ]]; then
+        section=$container_heading
+        prefix="$container_heading "
+        message=${message#"$prefix"}
+      fi
+    fi
     if [[ $section != "$previous_section" ]]; then
       printf '\n%s[+] %s%s\n' "$yellow" "$section" "$reset"
       printf '%s\n' '----------------------------------------------'

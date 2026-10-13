@@ -25,7 +25,9 @@ Restart comparisons match container IDs: recreating a container starts a new
 history. A lifetime restart count alone is informational.
 
 Text output includes an inventory sorted by Compose project and container, then
-findings using the shared report hierarchy. JSON includes `tool`, version,
+findings under a heading for each container using the shared report hierarchy.
+Container names appear once in these headings rather than on every finding row.
+JSON includes `tool`, version,
 findings, and a `containers` inventory suitable for the next baseline. Containers
 without Compose labels are grouped under `standalone`.
 
