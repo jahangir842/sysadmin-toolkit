@@ -77,6 +77,15 @@ behavior. Contributions must pass `shellcheck` and `bats tests`.
 
 ## Quick Docker status check
 
+Requires Docker CLI, `jq`, and GNU `timeout` (provided by `coreutils`), plus
+access to a running Docker daemon. On Debian/Ubuntu, install the reporting
+dependencies before the first run:
+
+```sh
+sudo apt-get update
+sudo apt-get install -y jq coreutils
+```
+
 From the checkout directory, run:
 
 ```sh
@@ -97,8 +106,7 @@ To detect new restarts since a saved JSON report:
 sudo ./bin/container-health-check --baseline containers.json --format text
 ```
 
-Requires Docker CLI, `jq`, and GNU `timeout`, plus Docker daemon access. The
-report groups containers by Compose project and checks health, OOM kills,
+The report groups containers by Compose project and checks health, OOM kills,
 resource limits, disk usage, published ports, security settings, and logging.
 It is read-only. Missing health checks are `UNKNOWN`; stopped containers are
 informational unless listed in `--expected`. Protect saved reports as sensitive

@@ -1,8 +1,16 @@
 # Docker container reports
 
 Run from the Git checkout on the Docker host. The command requires Bash, Docker
-CLI, `jq`, and GNU `timeout`, plus permission to query the Docker daemon. On
-Debian/Ubuntu, install `jq` with `sudo apt-get install jq` if it is missing.
+CLI, `jq`, and GNU `timeout` (provided by `coreutils`), plus permission to query
+a running Docker daemon. On Debian/Ubuntu, install the reporting dependencies
+before the first run:
+
+```sh
+sudo apt-get update
+sudo apt-get install -y jq coreutils
+```
+
+Then run the checker from the checkout directory:
 
 ```sh
 sudo ./bin/container-health-check --format text
