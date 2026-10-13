@@ -103,8 +103,15 @@ if [[ $FORMAT == json ]]; then
   render_json >"$TOOLKIT_TMPDIR/report"
   jq --slurpfile containers "$TOOLKIT_TMPDIR/containers" '. + {containers: $containers[0]}' "$TOOLKIT_TMPDIR/report"
 else
-  printf 'PROJECT\tCONTAINER\tSTATE\tHEALTH\tRESTARTS\n'
-  jq -r '.[] | [.project, .name, .state, .health, .restarts] | @tsv' "$TOOLKIT_TMPDIR/containers"
+  jq -r '[["PROJECT", "CONTAINER", "STATE", "HEALTH", "RESTARTS"]] +
+    [.[] | [.project, .name, .state, .health, (.restarts | tostring)]] |
+    . as $rows |
+    [range(0; 5) as $column | [$rows[] | .[$column] | length] | max] as $widths |
+    $rows[] | . as $row |
+    [range(0; 5) as $column |
+      $row[$column] + (if $column < 4 then
+        " " * ($widths[$column] - ($row[$column] | length)) else "" end)] |
+    join("  ")' "$TOOLKIT_TMPDIR/containers"
   render_text
 fi
 findings_exit_code

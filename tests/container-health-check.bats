@@ -26,6 +26,19 @@ change_fixture() {
   [ "$status" -eq 0 ]
   [[ $output == *"CONTAINER HEALTH REPORT"* && $output == *"site"* && $output == *"Summary:"* ]]
 }
+@test "inventory columns align with long project and container names" {
+  change_fixture '.[0].Name = "/nginx-proxy-manager" | .[0].Config.Labels["com.docker.compose.project"] = "drupal-staging"'
+  check_containers
+  [ "$status" -eq 0 ]
+  table=$(printf '%s\n' "$output" | head -2)
+  [[ $table != *$'\t'* ]]
+  header_state=$(printf '%s\n' "$table" | awk 'NR == 1 {print index($0, "STATE")}')
+  while IFS= read -r row; do
+    row_state=$(awk '{print index($0, "running")}' <<<"$row")
+    [ "$row_state" -eq "$header_state" ]
+  done < <(printf '%s\n' "$table" | tail -1)
+  [[ $table == *"nginx-proxy-manager"* && $table == *"drupal-staging"* ]]
+}
 @test "missing expected service fails, stopped jobs are informational" {
   change_fixture '.[0].State.Status = "exited" | .[0].State.ExitCode = 0 | del(.[0].State.Health)'
   check_containers --format json
